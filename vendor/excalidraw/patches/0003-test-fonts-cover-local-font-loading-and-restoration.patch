@@ -1,0 +1,226 @@
+From a9707fc3011fd62ba738f3ef918756c40323629a Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Tue, 1 Sep 2026 21:55:29 +0800
+Subject: [PATCH 3/3] test(fonts): cover local font loading and restoration
+
+---
+ packages/excalidraw/tests/localFonts.test.ts | 207 +++++++++++++++++++
+ 1 file changed, 207 insertions(+)
+ create mode 100644 packages/excalidraw/tests/localFonts.test.ts
+
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+new file mode 100644
+index 0000000..85dd07d
+--- /dev/null
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -0,0 +1,207 @@
++import { vi } from "vitest";
++
++import { FONT_FAMILY, LOCAL_FONT_ID_START } from "../constants";
++import { restoreElements } from "../data/restore";
++import type { ExcalidrawTextElement } from "../element/types";
++import {
++  Fonts,
++  LOCAL_FONT_CUSTOM_DATA_KEY,
++  type LocalFontDescriptor,
++} from "../fonts";
++import { getFontFamilyString } from "../utils";
++import { API } from "./helpers/api";
++
++const createFontData = (
++  family: string,
++  postscriptName: string,
++  style: string,
++  buffer: ArrayBuffer,
++): LocalFontAccessData => ({
++  family,
++  postscriptName,
++  fullName: `${family} ${style}`,
++  style,
++  blob: vi.fn(async () => ({
++    arrayBuffer: vi.fn(async () => buffer),
++  })) as unknown as LocalFontAccessData["blob"],
++});
++
++const createMetricsFontBuffer = () => {
++  const buffer = new ArrayBuffer(160);
++  const view = new DataView(buffer);
++  const writeTag = (offset: number, tag: string) => {
++    for (let index = 0; index < tag.length; index++) {
++      view.setUint8(offset + index, tag.charCodeAt(index));
++    }
++  };
++
++  view.setUint32(0, 0x00010000, false);
++  view.setUint16(4, 2, false);
++  writeTag(12, "head");
++  view.setUint32(20, 64, false);
++  writeTag(28, "hhea");
++  view.setUint32(36, 128, false);
++  view.setUint16(82, 2048, false);
++  view.setInt16(132, 1900, false);
++  view.setInt16(134, -500, false);
++  view.setInt16(136, 100, false);
++
++  return buffer;
++};
++
++afterEach(() => {
++  Reflect.deleteProperty(window, "queryLocalFonts");
++});
++
++describe("local fonts", () => {
++  it("enumerates families, reads metrics and persists the descriptor", async () => {
++    const metricsBuffer = createMetricsFontBuffer();
++    const sansFamily = "QYL Local Sans Test";
++    const serifFamily = "QYL Local Serif Test";
++    const sansRegular = createFontData(
++      sansFamily,
++      "QYLLocalSans-Regular",
++      "Regular",
++      metricsBuffer,
++    );
++
++    window.queryLocalFonts = vi.fn(async () => [
++      sansRegular,
++      createFontData(sansFamily, "QYLLocalSans-Bold", "Bold", metricsBuffer),
++      createFontData(
++        serifFamily,
++        "QYLLocalSerif-Regular",
++        "Regular",
++        metricsBuffer,
++      ),
++      createFontData("Nunito", "Nunito-Regular", "Regular", metricsBuffer),
++    ]);
++
++    const result = await Fonts.queryAndRegisterLocalFonts();
++    expect(result).toEqual({
++      faceCount: 4,
++      familyCount: 3,
++      registeredCount: 2,
++    });
++
++    const fontFamily = Array.from(Fonts.registered.entries()).find(
++      ([, registered]) =>
++        registered.fontFaces[0]?.fontFace.family === sansFamily,
++    )?.[0];
++    expect(fontFamily).toBeGreaterThanOrEqual(LOCAL_FONT_ID_START);
++
++    await Fonts.prepareLocalFont(fontFamily!);
++    await Fonts.prepareLocalFont(fontFamily!);
++    expect(sansRegular.blob).toHaveBeenCalledTimes(1);
++    expect(Fonts.getLocalFontDescriptor(fontFamily!)?.metrics).toEqual({
++      unitsPerEm: 2048,
++      ascender: 1900,
++      descender: -500,
++      lineHeight: 1.221,
++    });
++    expect(getFontFamilyString({ fontFamily: fontFamily! })).toContain(
++      JSON.stringify(sansFamily),
++    );
++
++    const textElement = API.createElement({
++      type: "text",
++      text: "local font",
++      fontFamily: fontFamily!,
++    });
++    expect(textElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY]).toMatchObject({
++      id: fontFamily,
++      family: sansFamily,
++      postscriptName: "QYLLocalSans-Regular",
++    });
++  });
++
++  it("restores a persisted descriptor and remaps an occupied font id", () => {
++    const descriptor: LocalFontDescriptor = {
++      id: FONT_FAMILY.Nunito,
++      family: "QYL Persisted Local Font Test",
++      fullName: "QYL Persisted Local Font Test Regular",
++      postscriptName: "QYLPersistedLocalFontTest-Regular",
++      style: "Regular",
++      metrics: {
++        unitsPerEm: 1000,
++        ascender: 820,
++        descender: -180,
++        lineHeight: 1.2,
++      },
++    };
++    const sourceElement = {
++      ...API.createElement({ type: "text", text: "persisted font" }),
++      fontFamily: descriptor.id,
++      customData: {
++        [LOCAL_FONT_CUSTOM_DATA_KEY]: descriptor,
++      },
++    } as ExcalidrawTextElement;
++
++    const restoredElement = restoreElements(
++      [sourceElement],
++      null,
++    )[0] as ExcalidrawTextElement;
++    expect(restoredElement.fontFamily).toBeGreaterThanOrEqual(
++      LOCAL_FONT_ID_START,
++    );
++    expect(restoredElement.fontFamily).not.toBe(FONT_FAMILY.Nunito);
++    expect(
++      restoredElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
++    ).toMatchObject({
++      id: restoredElement.fontFamily,
++      family: descriptor.family,
++      postscriptName: descriptor.postscriptName,
++      metrics: descriptor.metrics,
++    });
++    expect(
++      getFontFamilyString({ fontFamily: restoredElement.fontFamily }),
++    ).toContain(JSON.stringify(descriptor.family));
++  });
++
++  it("keeps persisted metrics when the same font was enumerated first", async () => {
++    const family = "QYL Restored Metrics Test";
++    const postscriptName = "QYLRestoredMetricsTest-Regular";
++    window.queryLocalFonts = vi.fn(async () => [
++      createFontData(
++        family,
++        postscriptName,
++        "Regular",
++        createMetricsFontBuffer(),
++      ),
++    ]);
++
++    await Fonts.queryAndRegisterLocalFonts();
++    const fontFamily = Array.from(Fonts.registered.keys()).find(
++      (candidate) =>
++        Fonts.getLocalFontDescriptor(candidate)?.postscriptName ===
++        postscriptName,
++    )!;
++    const persistedMetrics = {
++      unitsPerEm: 1000,
++      ascender: 880,
++      descender: -220,
++      lineHeight: 1.1,
++    };
++    const sourceElement = {
++      ...API.createElement({ type: "text", text: "persisted metrics" }),
++      fontFamily,
++      customData: {
++        [LOCAL_FONT_CUSTOM_DATA_KEY]: {
++          ...Fonts.getLocalFontDescriptor(fontFamily)!,
++          metrics: persistedMetrics,
++        },
++      },
++    } as ExcalidrawTextElement;
++
++    const restoredElement = restoreElements(
++      [sourceElement],
++      null,
++    )[0] as ExcalidrawTextElement;
++    expect(Fonts.getLocalFontDescriptor(fontFamily)?.metrics).toEqual(
++      persistedMetrics,
++    );
++    expect(
++      restoredElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
++    ).toMatchObject({ metrics: persistedMetrics });
++  });
++});
+-- 
+2.53.0
+
