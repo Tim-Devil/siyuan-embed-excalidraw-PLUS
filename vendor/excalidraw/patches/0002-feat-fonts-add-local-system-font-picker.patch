@@ -1,0 +1,466 @@
+From 6a613f93b83b8c023ea60b106d1736488d4c7c4c Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Tue, 1 Sep 2026 21:55:28 +0800
+Subject: [PATCH 2/3] feat(fonts): add local system font picker
+
+---
+ .../components/FontPicker/FontPicker.scss     |  80 +++++++
+ .../components/FontPicker/FontPickerList.tsx  | 219 +++++++++++++-----
+ packages/excalidraw/locales/en.json           |   9 +-
+ packages/excalidraw/locales/zh-CN.json        |  15 ++
+ 4 files changed, 266 insertions(+), 57 deletions(-)
+
+diff --git a/packages/excalidraw/components/FontPicker/FontPicker.scss b/packages/excalidraw/components/FontPicker/FontPicker.scss
+index 5a57258..5d398f0 100644
+--- a/packages/excalidraw/components/FontPicker/FontPicker.scss
++++ b/packages/excalidraw/components/FontPicker/FontPicker.scss
+@@ -12,4 +12,84 @@
+       ); // 4 gaps + 4 buttons
+     }
+   }
++
++  .FontPicker__local-fonts {
++    display: grid;
++    gap: 0.25rem;
++    padding: 0.5rem 0.5rem 0.25rem;
++  }
++
++  .FontPicker__local-fonts-button {
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    gap: 0.5rem;
++    min-height: 2.25rem;
++    padding: 0 0.75rem;
++    border: 1px solid var(--button-gray-3);
++    border-radius: var(--border-radius-md);
++    color: var(--text-primary-color);
++    background: var(--button-gray-1);
++    cursor: pointer;
++
++    &:hover:not(:disabled) {
++      background: var(--button-hover-bg);
++    }
++
++    &:disabled {
++      cursor: default;
++      opacity: 0.6;
++    }
++  }
++
++  .FontPicker__local-fonts-icon {
++    display: inline-flex;
++    width: 1rem;
++    height: 1rem;
++  }
++
++  .FontPicker__local-fonts-status {
++    min-height: 1rem;
++    color: var(--color-gray-60);
++    font-size: 0.75rem;
++    line-height: 1rem;
++    text-align: center;
++
++    &.is-error {
++      color: var(--color-danger);
++    }
++  }
++
++  .FontPicker__popover {
++    max-inline-size: calc(100vw - 1rem);
++
++    > .Island {
++      inline-size: max-content;
++      min-inline-size: min(24ch, calc(100vw - 1rem));
++      max-inline-size: min(48ch, calc(100vw - 1rem));
++    }
++
++    .FontPicker__font-item.dropdown-menu-item {
++      height: auto;
++      min-height: 2rem;
++      padding-block: 0.375rem;
++
++      .dropdown-menu-item__text {
++        overflow: visible;
++        white-space: normal;
++        overflow-wrap: anywhere;
++        text-overflow: clip;
++        line-height: 1.3;
++      }
++    }
++
++    .FontPicker__group .dropdown-menu-group-title {
++      font-weight: 600;
++    }
++
++    .FontPicker__group--local {
++      padding-top: 0.75rem;
++      border-top: 1px solid var(--default-border-color);
++    }
++  }
+ }
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index 3a680b8..680a394 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -28,6 +28,7 @@ export interface FontDescriptor {
+   value: number;
+   icon: JSX.Element;
+   text: string;
++  source: "builtIn" | "local";
+   deprecated?: true;
+   badge?: {
+     type: ValueOf<typeof DropDownMenuItemBadgeType>;
+@@ -45,6 +46,59 @@ interface FontPickerListProps {
+   onClose: () => void;
+ }
+ 
++type LocalFontStatus =
++  | { type: "idle" }
++  | { type: "loading" }
++  | { type: "ready"; count: number }
++  | { type: "unsupported" }
++  | { type: "error" };
++
++const stripSerializedFontFamilyQuotes = (fontFamily: string) => {
++  const trimmedFontFamily = fontFamily.trim();
++  const firstCharacter = trimmedFontFamily[0];
++
++  if (
++    (firstCharacter === '"' || firstCharacter === "'") &&
++    trimmedFontFamily.at(-1) === firstCharacter
++  ) {
++    return trimmedFontFamily.slice(1, -1);
++  }
++
++  return trimmedFontFamily;
++};
++
++const getFontDescriptors = () =>
++  Array.from(Fonts.registered.entries())
++    .filter(([, { metadata }]) => !metadata.serverSide && !metadata.fallback)
++    .map(([familyId, { metadata, fontFaces }]) => {
++      const localFontDescriptor = Fonts.getLocalFontDescriptor(familyId);
++      const fontDescriptor = {
++        value: familyId,
++        icon: metadata.icon ?? FontFamilyNormalIcon,
++        text:
++          localFontDescriptor?.family ??
++          stripSerializedFontFamilyQuotes(
++            fontFaces[0]?.fontFace?.family ?? "Unknown",
++          ),
++        source: localFontDescriptor ? "local" : "builtIn",
++      };
++
++      if (metadata.deprecated) {
++        Object.assign(fontDescriptor, {
++          deprecated: metadata.deprecated,
++          badge: {
++            type: DropDownMenuItemBadgeType.RED,
++            placeholder: t("fontList.badge.old"),
++          },
++        });
++      }
++
++      return fontDescriptor as FontDescriptor;
++    })
++    .sort((a, b) =>
++      a.text.localeCompare(b.text, undefined, { sensitivity: "base" }),
++    );
++
+ export const FontPickerList = React.memo(
+   ({
+     selectedFontFamily,
+@@ -60,36 +114,37 @@ export const FontPickerList = React.memo(
+     const { showDeprecatedFonts } = useAppProps();
+ 
+     const [searchTerm, setSearchTerm] = useState("");
+-    const inputRef = useRef<HTMLInputElement>(null);
+-    const allFonts = useMemo(
++    const [allFonts, setAllFonts] = useState(getFontDescriptors);
++    const [localFontStatus, setLocalFontStatus] = useState<LocalFontStatus>(
+       () =>
+-        Array.from(Fonts.registered.entries())
+-          .filter(
+-            ([_, { metadata }]) => !metadata.serverSide && !metadata.fallback,
+-          )
+-          .map(([familyId, { metadata, fontFaces }]) => {
+-            const fontDescriptor = {
+-              value: familyId,
+-              icon: metadata.icon ?? FontFamilyNormalIcon,
+-              text: fontFaces[0]?.fontFace?.family ?? "Unknown",
+-            };
+-
+-            if (metadata.deprecated) {
+-              Object.assign(fontDescriptor, {
+-                deprecated: metadata.deprecated,
+-                badge: {
+-                  type: DropDownMenuItemBadgeType.RED,
+-                  placeholder: t("fontList.badge.old"),
+-                },
+-              });
+-            }
++        Fonts.supportsLocalFontAccess()
++          ? { type: "idle" }
++          : { type: "unsupported" },
++    );
++    const inputRef = useRef<HTMLInputElement>(null);
+ 
+-            return fontDescriptor as FontDescriptor;
+-          })
+-          .sort((a, b) =>
+-            a.text.toLowerCase() > b.text.toLowerCase() ? 1 : -1,
+-          ),
+-      [],
++    const loadLocalFonts = useCallback(async () => {
++      setLocalFontStatus({ type: "loading" });
++
++      try {
++        const result = await Fonts.queryAndRegisterLocalFonts();
++        setAllFonts(getFontDescriptors());
++        setLocalFontStatus({
++          type: "ready",
++          count: result.registeredCount,
++        });
++      } catch (error) {
++        console.error("Failed to enumerate local fonts", error);
++        setLocalFontStatus({ type: "error" });
++      }
++    }, []);
++
++    const selectFont = useCallback(
++      async (fontFamily: number) => {
++        await Fonts.prepareLocalFont(fontFamily);
++        onSelect(fontFamily);
++      },
++      [onSelect],
+     );
+ 
+     const sceneFamilies = useMemo(
+@@ -114,15 +169,19 @@ export const FontPickerList = React.memo(
+       [allFonts, sceneFamilies, showDeprecatedFonts],
+     );
+ 
+-    const filteredFonts = useMemo(
+-      () =>
+-        arrayToList(
+-          [...sceneFonts, ...availableFonts].filter((font) =>
+-            font.text?.toLowerCase().includes(searchTerm),
+-          ),
++    const filteredFonts = useMemo(() => {
++      const prioritizedFonts = [...sceneFonts, ...availableFonts];
++      const fontsBySource = [
++        ...prioritizedFonts.filter((font) => font.source === "builtIn"),
++        ...prioritizedFonts.filter((font) => font.source === "local"),
++      ];
++
++      return arrayToList(
++        fontsBySource.filter((font) =>
++          font.text?.toLowerCase().includes(searchTerm),
+         ),
+-      [sceneFonts, availableFonts, searchTerm],
+-    );
++      );
++    }, [sceneFonts, availableFonts, searchTerm]);
+ 
+     const hoveredFont = useMemo(() => {
+       let font;
+@@ -160,7 +219,7 @@ export const FontPickerList = React.memo(
+           inputRef,
+           hoveredFont,
+           filteredFonts,
+-          onSelect,
++          onSelect: (fontFamily) => void selectFont(fontFamily),
+           onHover,
+           onClose,
+         });
+@@ -170,7 +229,7 @@ export const FontPickerList = React.memo(
+           event.stopPropagation();
+         }
+       },
+-      [hoveredFont, filteredFonts, onSelect, onHover, onClose],
++      [hoveredFont, filteredFonts, selectFont, onHover, onClose],
+     );
+ 
+     useEffect(() => {
+@@ -182,22 +241,24 @@ export const FontPickerList = React.memo(
+       // eslint-disable-next-line react-hooks/exhaustive-deps
+     }, []);
+ 
+-    const sceneFilteredFonts = useMemo(
+-      () => filteredFonts.filter((font) => sceneFamilies.has(font.value)),
+-      [filteredFonts, sceneFamilies],
++    const builtInFilteredFonts = useMemo(
++      () => filteredFonts.filter((font) => font.source === "builtIn"),
++      [filteredFonts],
+     );
+ 
+-    const availableFilteredFonts = useMemo(
+-      () => filteredFonts.filter((font) => !sceneFamilies.has(font.value)),
+-      [filteredFonts, sceneFamilies],
++    const localFilteredFonts = useMemo(
++      () => filteredFonts.filter((font) => font.source === "local"),
++      [filteredFonts],
+     );
+ 
+     const renderFont = (font: FontDescriptor, index: number) => (
+       <DropdownMenuItem
+         key={font.value}
++        className="FontPicker__font-item"
+         icon={font.icon}
+         value={font.value}
+         order={index}
++        title={font.text}
+         textStyle={{
+           fontFamily: getFontFamilyString({ fontFamily: font.value }),
+         }}
+@@ -205,9 +266,7 @@ export const FontPickerList = React.memo(
+         selected={font.value === selectedFontFamily}
+         // allow to tab between search and selected font
+         tabIndex={font.value === selectedFontFamily ? 0 : -1}
+-        onClick={(e) => {
+-          onSelect(Number(e.currentTarget.value));
+-        }}
++        onClick={(e) => void selectFont(Number(e.currentTarget.value))}
+         onMouseMove={() => {
+           if (hoveredFont?.value !== font.value) {
+             onHover(font.value);
+@@ -225,19 +284,31 @@ export const FontPickerList = React.memo(
+ 
+     const groups = [];
+ 
+-    if (sceneFilteredFonts.length) {
++    if (builtInFilteredFonts.length) {
+       groups.push(
+-        <DropdownMenuGroup title={t("fontList.sceneFonts")} key="group_1">
+-          {sceneFilteredFonts.map(renderFont)}
++        <DropdownMenuGroup
++          className="FontPicker__group FontPicker__group--built-in"
++          title={t("fontList.builtInFonts", {
++            count: builtInFilteredFonts.length,
++          })}
++          key="built-in-fonts"
++        >
++          {builtInFilteredFonts.map(renderFont)}
+         </DropdownMenuGroup>,
+       );
+     }
+ 
+-    if (availableFilteredFonts.length) {
++    if (localFilteredFonts.length) {
+       groups.push(
+-        <DropdownMenuGroup title={t("fontList.availableFonts")} key="group_2">
+-          {availableFilteredFonts.map((font, index) =>
+-            renderFont(font, index + sceneFilteredFonts.length),
++        <DropdownMenuGroup
++          className="FontPicker__group FontPicker__group--local"
++          title={t("fontList.localFonts", {
++            count: localFilteredFonts.length,
++          })}
++          key="local-fonts"
++        >
++          {localFilteredFonts.map((font, index) =>
++            renderFont(font, index + builtInFilteredFonts.length),
+           )}
+         </DropdownMenuGroup>,
+       );
+@@ -245,13 +316,49 @@ export const FontPickerList = React.memo(
+ 
+     return (
+       <PropertiesPopover
+-        className="properties-content"
++        className="properties-content FontPicker__popover"
+         container={container}
+-        style={{ width: "15rem" }}
+         onClose={onClose}
+         onPointerLeave={onLeave}
+         onKeyDown={onKeyDown}
+       >
++        <div className="FontPicker__local-fonts">
++          <button
++            className="FontPicker__local-fonts-button"
++            type="button"
++            disabled={
++              localFontStatus.type === "loading" ||
++              localFontStatus.type === "unsupported"
++            }
++            onClick={loadLocalFonts}
++          >
++            <span className="FontPicker__local-fonts-icon">
++              {FontFamilyNormalIcon}
++            </span>
++            <span>
++              {localFontStatus.type === "loading"
++                ? t("fontList.loadingLocalFonts")
++                : t("fontList.loadLocalFonts")}
++            </span>
++          </button>
++          {localFontStatus.type === "ready" && (
++            <div className="FontPicker__local-fonts-status">
++              {t("fontList.localFontsReady", {
++                count: localFontStatus.count,
++              })}
++            </div>
++          )}
++          {localFontStatus.type === "error" && (
++            <div className="FontPicker__local-fonts-status is-error">
++              {t("fontList.localFontsError")}
++            </div>
++          )}
++          {localFontStatus.type === "unsupported" && (
++            <div className="FontPicker__local-fonts-status">
++              {t("fontList.localFontsUnsupported")}
++            </div>
++          )}
++        </div>
+         <QuickSearch
+           ref={inputRef}
+           placeholder={t("quickSearch.placeholder")}
+diff --git a/packages/excalidraw/locales/en.json b/packages/excalidraw/locales/en.json
+index f14b797..7751070 100644
+--- a/packages/excalidraw/locales/en.json
++++ b/packages/excalidraw/locales/en.json
+@@ -603,7 +603,14 @@
+     },
+     "sceneFonts": "In this scene",
+     "availableFonts": "Available fonts",
+-    "empty": "No fonts found"
++    "empty": "No fonts found",
++    "builtInFonts": "Excalidraw fonts ({{count}})",
++    "localFonts": "Local fonts ({{count}})",
++    "loadLocalFonts": "Load local fonts",
++    "loadingLocalFonts": "Reading local fonts...",
++    "localFontsReady": "{{count}} local font families loaded",
++    "localFontsError": "Local fonts could not be read",
++    "localFontsUnsupported": "Local font access is unavailable"
+   },
+   "userList": {
+     "empty": "No users found",
+diff --git a/packages/excalidraw/locales/zh-CN.json b/packages/excalidraw/locales/zh-CN.json
+index 19d7157..cd8ad2e 100644
+--- a/packages/excalidraw/locales/zh-CN.json
++++ b/packages/excalidraw/locales/zh-CN.json
+@@ -521,5 +521,20 @@
+     "description": "目前仅支持<flowchartLink>流程图</flowchartLink>、<sequenceLink>序列图</sequenceLink>和<classLink>类图</classLink>。其他类型在 Excalidraw 中将以图像呈现。",
+     "syntax": "Mermaid 语法",
+     "preview": "预览"
++  },
++  "fontList": {
++    "badge": {
++      "old": "旧版"
++    },
++    "sceneFonts": "当前场景",
++    "availableFonts": "可用字体",
++    "empty": "未找到字体",
++    "builtInFonts": "Excalidraw 内置字体（{{count}}）",
++    "localFonts": "本机字体（{{count}}）",
++    "loadLocalFonts": "读取本机字体",
++    "loadingLocalFonts": "正在读取本机字体...",
++    "localFontsReady": "已载入 {{count}} 个本机字体家族",
++    "localFontsError": "读取本机字体失败",
++    "localFontsUnsupported": "当前环境不支持本机字体读取"
+   }
+ }
+-- 
+2.53.0
+
