@@ -21,10 +21,11 @@
     "build:embed-siyuan": "vite build --config vite.embed-siyuan.config.ts",
     "build:embed-markdown": "vite build --config vite.embed-markdown.config.ts",
     "build:plugin": "vite build",
+    "build:excalidraw-fork": "node ./scripts/rebuild-excalidraw-fonts.mjs",
     "build": "pnpm build:app && pnpm build:embed-siyuan && pnpm build:embed-markdown && pnpm build:plugin"
   },
   "dependencies": {
-    "@excalidraw/excalidraw": "^0.18.0",
+    "@excalidraw/excalidraw": "file:vendor/excalidraw/excalidraw-0.18.0-local-fonts.1.tgz",
     "@zumer/snapdom": "^2.0.2",
     "crypto-js": "^4.2.0",
     "lodash": "^4.17.21",
