@@ -1,0 +1,690 @@
+From 7715390d01086c33dd09819b96833cf752c9ce14 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Tue, 1 Sep 2026 21:55:27 +0800
+Subject: [PATCH 1/3] feat(fonts): add local font registration and persistence
+
+---
+ .../excalidraw/actions/actionProperties.tsx   |   4 +
+ packages/excalidraw/constants.ts              |  13 +
+ packages/excalidraw/data/restore.ts           |  11 +-
+ packages/excalidraw/element/newElement.ts     |   3 +-
+ packages/excalidraw/fonts/FontMetadata.ts     |   2 +-
+ packages/excalidraw/fonts/Fonts.ts            | 466 +++++++++++++++++-
+ packages/excalidraw/global.d.ts               |  11 +
+ packages/excalidraw/utils.ts                  |  10 +
+ 8 files changed, 516 insertions(+), 4 deletions(-)
+
+diff --git a/packages/excalidraw/actions/actionProperties.tsx b/packages/excalidraw/actions/actionProperties.tsx
+index 0c2ad3b..7cfb123 100644
+--- a/packages/excalidraw/actions/actionProperties.tsx
++++ b/packages/excalidraw/actions/actionProperties.tsx
+@@ -893,6 +893,10 @@ export const actionChangeFontFamily = register({
+                 {
+                   fontFamily: nextFontFamily,
+                   lineHeight: getLineHeight(nextFontFamily!),
++                  customData: Fonts.syncLocalFontCustomData(
++                    oldElement.customData,
++                    nextFontFamily!,
++                  ),
+                 },
+               );
+ 
+diff --git a/packages/excalidraw/constants.ts b/packages/excalidraw/constants.ts
+index 616ced1..2bab6b7 100644
+--- a/packages/excalidraw/constants.ts
++++ b/packages/excalidraw/constants.ts
+@@ -144,6 +144,19 @@ export const FONT_FAMILY_FALLBACKS = {
+   [WINDOWS_EMOJI_FALLBACK_FONT]: 1000,
+ };
+ 
++export const LOCAL_FONT_ID_START = 10_000;
++
++const LOCAL_FONT_FAMILY_NAMES = new Map<number, string>();
++
++export const registerLocalFontFamilyName = (id: number, family: string) => {
++  if (id >= LOCAL_FONT_ID_START && family.trim()) {
++    LOCAL_FONT_FAMILY_NAMES.set(id, family.trim());
++  }
++};
++
++export const getLocalFontFamilyName = (id: number) =>
++  LOCAL_FONT_FAMILY_NAMES.get(id);
++
+ export const getFontFamilyFallbacks = (
+   fontFamily: number,
+ ): Array<keyof typeof FONT_FAMILY_FALLBACKS> => {
+diff --git a/packages/excalidraw/data/restore.ts b/packages/excalidraw/data/restore.ts
+index c4e45b0..8c8da70 100644
+--- a/packages/excalidraw/data/restore.ts
++++ b/packages/excalidraw/data/restore.ts
+@@ -51,7 +51,7 @@ import { getContainerElement } from "../element/textElement";
+ import { normalizeLink } from "./url";
+ import { syncInvalidIndices } from "../fractionalIndex";
+ import { getSizeFromPoints } from "../points";
+-import { getLineHeight } from "../fonts";
++import { Fonts, getLineHeight } from "../fonts";
+ import { normalizeFixedPoint } from "../element/binding";
+ import {
+   getNormalizedGridSize,
+@@ -242,6 +242,7 @@ const restoreElement = (
+         fontSize = parseFloat(fontPx);
+         fontFamily = getFontFamilyByName(_fontFamily);
+       }
++      fontFamily = Fonts.resolveLocalFontFamily(element.customData, fontFamily);
+       const text = (typeof element.text === "string" && element.text) || "";
+ 
+       // line-height might not be specified either when creating elements
+@@ -258,6 +259,10 @@ const restoreElement = (
+             // to a fixed line height
+             getLineHeight(element.fontFamily));
+       element = restoreElementWithProperties(element, {
++        customData: Fonts.syncLocalFontCustomData(
++          element.customData,
++          fontFamily,
++        ),
+         fontSize,
+         fontFamily,
+         text,
+@@ -493,6 +498,10 @@ export const restoreElements = (
+   localElements: readonly ExcalidrawElement[] | null | undefined,
+   opts?: { refreshDimensions?: boolean; repairBindings?: boolean } | undefined,
+ ): OrderedExcalidrawElement[] => {
++  Fonts.registerLocalFontsFromElements(
++    (elements || []) as readonly ExcalidrawElement[],
++  );
++
+   // used to detect duplicate top-level element ids
+   const existingIds = new Set<string>();
+   const localElementsMap = localElements ? arrayToMap(localElements) : null;
+diff --git a/packages/excalidraw/element/newElement.ts b/packages/excalidraw/element/newElement.ts
+index 7d1f149..c066fc1 100644
+--- a/packages/excalidraw/element/newElement.ts
++++ b/packages/excalidraw/element/newElement.ts
+@@ -45,7 +45,7 @@ import {
+   VERTICAL_ALIGN,
+ } from "../constants";
+ import type { MarkOptional, Merge, Mutable } from "../utility-types";
+-import { getLineHeight } from "../fonts";
++import { Fonts, getLineHeight } from "../fonts";
+ import type { Radians } from "@excalidraw/math";
+ import { normalizeText, measureText } from "./textMeasurements";
+ 
+@@ -266,6 +266,7 @@ export const newTextElement = (
+ 
+   const textElementProps: ExcalidrawTextElement = {
+     ..._newElementBase<ExcalidrawTextElement>("text", opts),
++    customData: Fonts.syncLocalFontCustomData(opts.customData, fontFamily),
+     text,
+     fontSize,
+     fontFamily,
+diff --git a/packages/excalidraw/fonts/FontMetadata.ts b/packages/excalidraw/fonts/FontMetadata.ts
+index e93380e..0cc0ea5 100644
+--- a/packages/excalidraw/fonts/FontMetadata.ts
++++ b/packages/excalidraw/fonts/FontMetadata.ts
+@@ -14,7 +14,7 @@ export interface FontMetadata {
+   /** for head & hhea metrics read the woff2 with https://fontdrop.info/ */
+   metrics: {
+     /** head.unitsPerEm metric */
+-    unitsPerEm: 1000 | 1024 | 2048;
++    unitsPerEm: number;
+     /** hhea.ascender metric */
+     ascender: number;
+     /** hhea.descender metric */
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index 4b8ba78..3a4a3c7 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -4,6 +4,8 @@ import {
+   CJK_HAND_DRAWN_FALLBACK_FONT,
+   WINDOWS_EMOJI_FALLBACK_FONT,
+   getFontFamilyFallbacks,
++  LOCAL_FONT_ID_START,
++  registerLocalFontFamilyName,
+ } from "../constants";
+ import { isTextElement } from "../element";
+ import { getContainerElement } from "../element/textElement";
+@@ -23,7 +25,11 @@ import { NunitoFontFaces } from "./Nunito";
+ import { VirgilFontFaces } from "./Virgil";
+ import { XiaolaiFontFaces } from "./Xiaolai";
+ 
+-import { FONT_METADATA, type FontMetadata } from "./FontMetadata";
++import {
++  FONT_METADATA,
++  LOCAL_FONT_PROTOCOL,
++  type FontMetadata,
++} from "./FontMetadata";
+ import type {
+   ExcalidrawElement,
+   ExcalidrawTextElement,
+@@ -33,6 +39,23 @@ import type Scene from "../scene/Scene";
+ import type { ValueOf } from "../utility-types";
+ import { charWidth } from "../element/textMeasurements";
+ 
++export const LOCAL_FONT_CUSTOM_DATA_KEY = "siyuanEmbedExcalidrawFont";
++
++export type LocalFontDescriptor = {
++  id: number;
++  family: string;
++  fullName: string;
++  postscriptName: string;
++  style: string;
++  metrics: FontMetadata["metrics"];
++};
++
++export type LocalFontQueryResult = {
++  faceCount: number;
++  familyCount: number;
++  registeredCount: number;
++};
++
+ export class Fonts {
+   // it's ok to track fonts across multiple instances only once, so let's use
+   // a static member to reduce memory footprint
+@@ -50,6 +73,28 @@ export class Fonts {
+ 
+   private static _initialized: boolean = false;
+ 
++  private static readonly localFontDescriptors = new Map<
++    number,
++    LocalFontDescriptor
++  >();
++
++  private static readonly localFontIdsByPostscriptName = new Map<
++    string,
++    number
++  >();
++
++  private static readonly localFontLoaders = new Map<
++    number,
++    () => Promise<Blob>
++  >();
++
++  private static readonly localFontPreparation = new Map<
++    number,
++    Promise<void>
++  >();
++
++  private static readonly preparedLocalFontIds = new Set<number>();
++
+   public static get registered() {
+     // lazy load the font registration
+     if (!Fonts._registered) {
+@@ -306,6 +351,425 @@ export class Fonts {
+     }
+   }
+ 
++  public static supportsLocalFontAccess() {
++    return (
++      typeof window !== "undefined" &&
++      typeof window.queryLocalFonts === "function"
++    );
++  }
++
++  public static async queryAndRegisterLocalFonts(): Promise<LocalFontQueryResult> {
++    const queryLocalFonts = window.queryLocalFonts;
++    if (typeof queryLocalFonts !== "function") {
++      throw new Error("Local Font Access API is unavailable");
++    }
++
++    const fontFaces = await queryLocalFonts.call(window);
++    const families = new Map<string, LocalFontAccessData[]>();
++
++    for (const fontFace of fontFaces) {
++      if (
++        !fontFace.family?.trim() ||
++        !fontFace.postscriptName?.trim() ||
++        typeof fontFace.blob !== "function"
++      ) {
++        continue;
++      }
++
++      const family = fontFace.family.trim();
++      const familyFaces = families.get(family) ?? [];
++      familyFaces.push(fontFace);
++      families.set(family, familyFaces);
++    }
++
++    let registeredCount = 0;
++    const fontFamilies = FONT_FAMILY as Record<string, number>;
++
++    for (const [family, faces] of Array.from(families.entries()).sort(
++      ([left], [right]) => left.localeCompare(right),
++    )) {
++      const existingFamilyId = fontFamilies[family];
++      if (
++        typeof existingFamilyId === "number" &&
++        existingFamilyId < LOCAL_FONT_ID_START
++      ) {
++        continue;
++      }
++
++      const preferredFace =
++        faces.find((fontFace) =>
++          /^(regular|normal|book|roman)$/i.test(fontFace.style.trim()),
++        ) ?? faces[0];
++
++      const descriptor = Fonts.registerLocalFontDescriptor(
++        {
++          id: Fonts.allocateLocalFontId(preferredFace.postscriptName),
++          family,
++          fullName: preferredFace.fullName?.trim() || family,
++          postscriptName: preferredFace.postscriptName.trim(),
++          style: preferredFace.style?.trim() || "Regular",
++          metrics: Fonts.getDefaultLocalFontMetrics(),
++        },
++        () => preferredFace.blob(),
++      );
++
++      if (descriptor.id >= LOCAL_FONT_ID_START) {
++        registeredCount++;
++      }
++    }
++
++    return {
++      faceCount: fontFaces.length,
++      familyCount: families.size,
++      registeredCount,
++    };
++  }
++
++  public static getLocalFontDescriptor(fontFamily: number) {
++    return Fonts.localFontDescriptors.get(fontFamily);
++  }
++
++  public static syncLocalFontCustomData(
++    customData: ExcalidrawElement["customData"],
++    fontFamily: number,
++  ): ExcalidrawElement["customData"] {
++    const descriptor = Fonts.localFontDescriptors.get(fontFamily);
++
++    if (descriptor) {
++      return {
++        ...customData,
++        [LOCAL_FONT_CUSTOM_DATA_KEY]: {
++          ...descriptor,
++          metrics: { ...descriptor.metrics },
++        },
++      };
++    }
++
++    if (customData && LOCAL_FONT_CUSTOM_DATA_KEY in customData) {
++      const nextCustomData = { ...customData };
++      delete nextCustomData[LOCAL_FONT_CUSTOM_DATA_KEY];
++      return Object.keys(nextCustomData).length ? nextCustomData : undefined;
++    }
++
++    return customData;
++  }
++
++  public static registerLocalFontsFromElements(
++    elements: readonly ExcalidrawElement[],
++  ) {
++    let registeredCount = 0;
++
++    for (const element of elements) {
++      if (!isTextElement(element)) {
++        continue;
++      }
++
++      const descriptor = Fonts.normalizeLocalFontDescriptor(
++        element.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
++      );
++      if (!descriptor) {
++        continue;
++      }
++
++      Fonts.registerLocalFontDescriptor(descriptor);
++      registeredCount++;
++    }
++
++    return registeredCount;
++  }
++
++  public static resolveLocalFontFamily(
++    customData: ExcalidrawElement["customData"],
++    fallbackFontFamily: number,
++  ) {
++    const descriptor = Fonts.normalizeLocalFontDescriptor(
++      customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
++    );
++
++    return descriptor
++      ? Fonts.registerLocalFontDescriptor(descriptor).id
++      : fallbackFontFamily;
++  }
++
++  public static async prepareLocalFont(fontFamily: number) {
++    const loader = Fonts.localFontLoaders.get(fontFamily);
++    if (!loader || !Fonts.localFontDescriptors.has(fontFamily)) {
++      return;
++    }
++
++    if (Fonts.preparedLocalFontIds.has(fontFamily)) {
++      return;
++    }
++
++    const pending = Fonts.localFontPreparation.get(fontFamily);
++    if (pending) {
++      return pending;
++    }
++
++    const preparation = promiseTry(async () => {
++      try {
++        const blob = await loader();
++        const metrics = Fonts.parseOpenTypeMetrics(await blob.arrayBuffer());
++        if (!metrics) {
++          return;
++        }
++
++        const descriptor = Fonts.localFontDescriptors.get(fontFamily);
++        const registered = Fonts.registered.get(fontFamily);
++        if (!descriptor || !registered) {
++          return;
++        }
++
++        const nextDescriptor = { ...descriptor, metrics };
++        Fonts.localFontDescriptors.set(fontFamily, nextDescriptor);
++        registered.metadata = {
++          ...registered.metadata,
++          metrics,
++        };
++        Fonts.preparedLocalFontIds.add(fontFamily);
++      } catch (error) {
++        console.warn("Failed to read local font metrics", error);
++      }
++    }).finally(() => {
++      Fonts.localFontPreparation.delete(fontFamily);
++    });
++
++    Fonts.localFontPreparation.set(fontFamily, preparation);
++    return preparation;
++  }
++
++  private static registerLocalFontDescriptor(
++    input: LocalFontDescriptor,
++    loader?: () => Promise<Blob>,
++  ) {
++    const normalizedInput = Fonts.normalizeLocalFontDescriptor(input);
++    if (!normalizedInput) {
++      throw new Error("Invalid local font descriptor");
++    }
++
++    const knownId = Fonts.localFontIdsByPostscriptName.get(
++      normalizedInput.postscriptName,
++    );
++    if (knownId) {
++      if (loader) {
++        Fonts.localFontLoaders.set(knownId, loader);
++        return Fonts.localFontDescriptors.get(knownId)!;
++      }
++
++      const descriptor = { ...normalizedInput, id: knownId };
++      registerLocalFontFamilyName(knownId, descriptor.family);
++      Fonts.localFontDescriptors.set(knownId, descriptor);
++
++      const registered = Fonts.registered.get(knownId);
++      if (registered) {
++        registered.metadata = {
++          ...registered.metadata,
++          metrics: { ...descriptor.metrics },
++        };
++      }
++
++      return descriptor;
++    }
++
++    const builtInId = (FONT_FAMILY as Record<string, number>)[
++      normalizedInput.family
++    ];
++    if (typeof builtInId === "number" && builtInId < LOCAL_FONT_ID_START) {
++      return { ...normalizedInput, id: builtInId };
++    }
++
++    let id = normalizedInput.id;
++    const occupiedDescriptor = Fonts.localFontDescriptors.get(id);
++    if (
++      id < LOCAL_FONT_ID_START ||
++      Fonts.registered.has(id) ||
++      (occupiedDescriptor &&
++        occupiedDescriptor.postscriptName !== normalizedInput.postscriptName)
++    ) {
++      id = Fonts.allocateLocalFontId(normalizedInput.postscriptName);
++    }
++
++    const descriptor = { ...normalizedInput, id };
++    registerLocalFontFamilyName(descriptor.id, descriptor.family);
++    Fonts.localFontDescriptors.set(descriptor.id, descriptor);
++    Fonts.localFontIdsByPostscriptName.set(
++      descriptor.postscriptName,
++      descriptor.id,
++    );
++    if (loader) {
++      Fonts.localFontLoaders.set(descriptor.id, loader);
++    }
++
++    Fonts.registered.set(descriptor.id, {
++      metadata: {
++        metrics: { ...descriptor.metrics },
++        local: true,
++      },
++      fontFaces: [
++        new ExcalidrawFontFace(descriptor.family, LOCAL_FONT_PROTOCOL),
++      ],
++    });
++    return descriptor;
++  }
++
++  private static allocateLocalFontId(postscriptName: string) {
++    const knownId = Fonts.localFontIdsByPostscriptName.get(postscriptName);
++    if (knownId) {
++      return knownId;
++    }
++
++    let hash = 2166136261;
++    for (let index = 0; index < postscriptName.length; index++) {
++      hash ^= postscriptName.charCodeAt(index);
++      hash = Math.imul(hash, 16777619);
++    }
++
++    const maxId = 0x7ffffffe;
++    const range = maxId - LOCAL_FONT_ID_START;
++    let id = LOCAL_FONT_ID_START + ((hash >>> 0) % range);
++
++    while (Fonts.registered.has(id) || Fonts.localFontDescriptors.has(id)) {
++      id = id >= maxId ? LOCAL_FONT_ID_START : id + 1;
++    }
++
++    return id;
++  }
++
++  private static getDefaultLocalFontMetrics(): FontMetadata["metrics"] {
++    return { ...FONT_METADATA[FONT_FAMILY.Helvetica].metrics };
++  }
++
++  private static normalizeLocalFontDescriptor(
++    value: unknown,
++  ): LocalFontDescriptor | null {
++    if (!value || typeof value !== "object") {
++      return null;
++    }
++
++    const descriptor = value as Partial<LocalFontDescriptor>;
++    if (
++      !Number.isInteger(descriptor.id) ||
++      typeof descriptor.family !== "string" ||
++      !descriptor.family.trim() ||
++      typeof descriptor.postscriptName !== "string" ||
++      !descriptor.postscriptName.trim()
++    ) {
++      return null;
++    }
++
++    const fallbackMetrics = Fonts.getDefaultLocalFontMetrics();
++    const metrics = descriptor.metrics;
++    const normalizedMetrics = {
++      unitsPerEm:
++        Number.isFinite(metrics?.unitsPerEm) && metrics!.unitsPerEm > 0
++          ? metrics!.unitsPerEm
++          : fallbackMetrics.unitsPerEm,
++      ascender: Number.isFinite(metrics?.ascender)
++        ? metrics!.ascender
++        : fallbackMetrics.ascender,
++      descender: Number.isFinite(metrics?.descender)
++        ? metrics!.descender
++        : fallbackMetrics.descender,
++      lineHeight:
++        Number.isFinite(metrics?.lineHeight) && metrics!.lineHeight > 0
++          ? metrics!.lineHeight
++          : fallbackMetrics.lineHeight,
++    };
++
++    return {
++      id: descriptor.id!,
++      family: descriptor.family.trim(),
++      fullName:
++        typeof descriptor.fullName === "string" && descriptor.fullName.trim()
++          ? descriptor.fullName.trim()
++          : descriptor.family.trim(),
++      postscriptName: descriptor.postscriptName.trim(),
++      style:
++        typeof descriptor.style === "string" && descriptor.style.trim()
++          ? descriptor.style.trim()
++          : "Regular",
++      metrics: normalizedMetrics,
++    };
++  }
++
++  private static parseOpenTypeMetrics(
++    buffer: ArrayBuffer,
++  ): FontMetadata["metrics"] | null {
++    const view = new DataView(buffer);
++    const readTag = (offset: number) => {
++      if (offset < 0 || offset + 4 > view.byteLength) {
++        return "";
++      }
++      return String.fromCharCode(
++        view.getUint8(offset),
++        view.getUint8(offset + 1),
++        view.getUint8(offset + 2),
++        view.getUint8(offset + 3),
++      );
++    };
++
++    if (view.byteLength < 12) {
++      return null;
++    }
++
++    let fontOffset = 0;
++    if (readTag(0) === "ttcf") {
++      if (view.byteLength < 16 || view.getUint32(8, false) < 1) {
++        return null;
++      }
++      fontOffset = view.getUint32(12, false);
++    }
++
++    if (fontOffset + 12 > view.byteLength) {
++      return null;
++    }
++
++    const tableCount = view.getUint16(fontOffset + 4, false);
++    let headOffset = -1;
++    let hheaOffset = -1;
++
++    for (let index = 0; index < tableCount; index++) {
++      const recordOffset = fontOffset + 12 + index * 16;
++      if (recordOffset + 16 > view.byteLength) {
++        return null;
++      }
++
++      const tag = readTag(recordOffset);
++      const tableOffset = view.getUint32(recordOffset + 8, false);
++      if (tag === "head") {
++        headOffset = tableOffset;
++      } else if (tag === "hhea") {
++        hheaOffset = tableOffset;
++      }
++    }
++
++    if (
++      headOffset < 0 ||
++      hheaOffset < 0 ||
++      headOffset + 20 > view.byteLength ||
++      hheaOffset + 10 > view.byteLength
++    ) {
++      return null;
++    }
++
++    const unitsPerEm = view.getUint16(headOffset + 18, false);
++    const ascender = view.getInt16(hheaOffset + 4, false);
++    const descender = view.getInt16(hheaOffset + 6, false);
++    const lineGap = view.getInt16(hheaOffset + 8, false);
++    if (!unitsPerEm) {
++      return null;
++    }
++
++    const naturalLineHeight =
++      (ascender - descender + Math.max(0, lineGap)) / unitsPerEm;
++    const lineHeight = Math.min(
++      3,
++      Math.max(1, Math.round(naturalLineHeight * 1000) / 1000),
++    );
++
++    return { unitsPerEm, ascender, descender, lineHeight };
++  }
++
+   /**
+    * Register a new font.
+    *
+diff --git a/packages/excalidraw/global.d.ts b/packages/excalidraw/global.d.ts
+index 2072657..8f2864b 100644
+--- a/packages/excalidraw/global.d.ts
++++ b/packages/excalidraw/global.d.ts
+@@ -8,6 +8,17 @@ interface Window {
+   gtag: Function;
+   sa_event: Function;
+   fathom: { trackEvent: Function };
++  queryLocalFonts?: (options?: {
++    postscriptNames?: string[];
++  }) => Promise<LocalFontAccessData[]>;
++}
++
++interface LocalFontAccessData {
++  readonly postscriptName: string;
++  readonly fullName: string;
++  readonly family: string;
++  readonly style: string;
++  blob(): Promise<Blob>;
+ }
+ 
+ interface CanvasRenderingContext2D {
+diff --git a/packages/excalidraw/utils.ts b/packages/excalidraw/utils.ts
+index e3e18eb..a39ec6b 100644
+--- a/packages/excalidraw/utils.ts
++++ b/packages/excalidraw/utils.ts
+@@ -5,6 +5,7 @@ import type { EVENT } from "./constants";
+ import {
+   DEFAULT_VERSION,
+   FONT_FAMILY,
++  getLocalFontFamilyName,
+   getFontFamilyFallbacks,
+   isDarwin,
+   WINDOWS_EMOJI_FALLBACK_FONT,
+@@ -93,6 +94,15 @@ export const getFontFamilyString = ({
+ }: {
+   fontFamily: FontFamilyValues;
+ }) => {
++  const localFontFamily = getLocalFontFamilyName(fontFamily);
++  if (localFontFamily) {
++    return `${JSON.stringify(localFontFamily)}${getFontFamilyFallbacks(
++      fontFamily,
++    )
++      .map((x) => `, ${x}`)
++      .join("")}`;
++  }
++
+   for (const [fontFamilyString, id] of Object.entries(FONT_FAMILY)) {
+     if (id === fontFamily) {
+       // TODO: we should fallback first to generic family names first
+-- 
+2.53.0
+
