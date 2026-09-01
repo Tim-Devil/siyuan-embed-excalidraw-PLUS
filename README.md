@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-    <a href="https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/blob/main/README_zh_CN.md">中文</a> | <a href="https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/blob/main/README.md">English</a>
+    <a href="https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/blob/main/README_zh_CN.md">中文</a> | <a href="https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/blob/main/README.md">English</a>
 </p>
 
 ---
@@ -34,10 +34,11 @@ This plugin serves as the fourth plugin in the **Embed Series**, aiming to provi
 - [x] Light/Dark mode
 - [x] Edit in Tab/Dialog
 - [x] Custom Snippets
+- [x] Load and use local system fonts
 - [x] Support SiYuan block in Excalidraw
 - [x] Markdown (include LaTeX math formulas, code block, mermaid, graphviz, flowchart)
 
-> If you have additional feature requests or suggestions, feel free to [open an issue on GitHub](https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/issues) or [post in the SiYuan community](https://ld246.com/article/1763408501738) to request support for additional features.
+> If you have additional feature requests or suggestions, feel free to [open an issue on GitHub](https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/issues) or [post in the SiYuan community](https://ld246.com/article/1763408501738) to request support for additional features.
 
 ## Effects on PC
 
@@ -56,7 +57,7 @@ In the plugin settings, modify the Excalidraw image storage format (only affects
 
 **Create an Excalidraw Image:**
 
-Type `/excalidraw` in the editor to create a new Excalidraw image.
+Type `/excalidraw-plus` in the editor to create a new Excalidraw image.
 
 **Edit a Excalidraw Image:**
 
@@ -68,6 +69,8 @@ The label of an Excalidraw image block can be configured in the plugin settings.
 
 **Excalidraw Snippets:** Create CSS/JS code snippets (do not enable) in the code snippet editor in SiYuan, then select the code snippet enabled in Excalidraw in the plugin settings to implement custom functionality and styles. You can also find code snippets in the [Excalidraw Code Snippet Marketplace](https://ld246.com/article/1764004088153).
 
+**Local Fonts:** Open the font picker, select `Load local fonts`, grant browser access, and choose a font from the `Local fonts` section.
+
 **Embedding SiYuan Content:**
 
 + Method1: Hold the left button of the SiYuan block / document in the filetree, drag it to the Excalidraw window, and the SiYuan content will be embedded in Excalidraw.
@@ -76,7 +79,7 @@ The label of an Excalidraw image block can be configured in the plugin settings.
 **Migrating from other sources:**
 
 + Method 1: Simply export your diagram as an SVG/PNG from any Excalidraw platform with the "Embed scene" option enabled, then drag the resulting SVG/PNG file into SiYuan.
-+ Method 2: Copy all content from any Excalidraw platform, type `/excalidraw` in the editor, and paste the copied content into the pop-up Excalidraw window.
++ Method 2: Copy all content from any Excalidraw platform, type `/excalidraw-plus` in the editor, and paste the copied content into the pop-up Excalidraw window.
 
 <details>
 <summary>Buy me a coffee☕</summary>
@@ -85,6 +88,9 @@ The label of an Excalidraw image block can be configured in the plugin settings.
 
 ## Changelog
 
++ v1.1.0
+    + Feature: load and use local system fonts
+    + Change: establish an independent PLUS plugin identity
 + v1.0.4
     + Optimize: add shortcut for fullscreen
 + v1.0.3

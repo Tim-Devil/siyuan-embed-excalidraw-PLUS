@@ -1,8 +1,8 @@
-# SiYuan Embed Excalidraw 项目上下文
+# SiYuan Embed Excalidraw PLUS 项目上下文
 
 ## 项目概述
 
-这是一个 **思源笔记 (SiYuan) 插件**，用于在思源笔记中嵌入 Excalidraw 绘图功能。插件允许用户直接在思源笔记中创建和编辑高质量的 SVG/PNG 矢量图形，所有编辑信息直接嵌入到图像文件中，确保内容可移植和可分享。
+这是一个 **思源笔记 (SiYuan) 插件** 的独立 PLUS 分支，用于在思源笔记中嵌入 Excalidraw 绘图功能。插件允许用户直接在思源笔记中创建和编辑高质量的 SVG/PNG 矢量图形，所有编辑信息直接嵌入到图像文件中，确保内容可移植和可分享。
 
 ### 核心技术栈
 
@@ -19,7 +19,7 @@
 ### 项目架构
 
 ```
-siyuan-embed-excalidraw/
+siyuan-embed-excalidraw-PLUS/
 ├── src/                    # 插件主入口和工具函数
 │   ├── index.ts           # 插件主逻辑 (ExcalidrawPlugin 类)
 │   ├── index.scss         # 插件样式
@@ -86,6 +86,7 @@ cp .env.example .env
 | `pnpm build:embed-siyuan` | 仅构建思源嵌入界面 |
 | `pnpm build:embed-markdown` | 仅构建 Markdown 嵌入界面 |
 | `pnpm build:plugin` | 仅构建插件主体 |
+| `pnpm build:excalidraw-fork` | 从固定补丁重新构建带本机字体支持的 Excalidraw 包 |
 
 ## 开发规范
 

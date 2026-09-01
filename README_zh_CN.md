@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-    <a href="https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/blob/main/README_zh_CN.md">中文</a> | <a href="https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/blob/main/README.md">English</a>
+    <a href="https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/blob/main/README_zh_CN.md">中文</a> | <a href="https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/blob/main/README.md">English</a>
 </p>
 
 ---
@@ -48,22 +48,25 @@
 - [x] 明暗模式
 - [x] Tab/Dialog窗口编辑
 - [x] 自定义代码片段
+- [x] 读取并使用本机字体
 - [x] 支持Excalidraw中显示思源文档内容
 - [x] Markdown (包括LaTeX公式、代码块、mermaid、graphviz、flowchart)
 
-> 如有更多需求/建议欢迎[在GitHub仓库中提issue](https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw/issues)或[在思源笔记社区中发帖](https://ld246.com/article/1763408501738)
+> 如有更多需求/建议欢迎[在GitHub仓库中提issue](https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS/issues)或[在思源笔记社区中发帖](https://ld246.com/article/1763408501738)
 
 ## 使用指南
 
 **设置Excalidraw图像存储格式：** 在插件设置中修改Excalidraw图像存储格式（只影响新创建的图像），可以选择 SVG/PNG。
 
-**创建Excalidraw图像：** 在编辑器中输入 `/excalidraw` 命令即可创建新Excalidraw图像。
+**创建Excalidraw图像：** 在编辑器中输入 `/excalidraw-plus` 命令即可创建新Excalidraw图像。
 
 **编辑Excalidraw图像：** 右键/点击图像右上角的菜单按钮，当图像被识别为合法的Excalidraw图像时，菜单中会显示 `编辑Excalidraw` 的选项，点击即可打开编辑窗口。
 
 **Excalidraw图像块标签：** 可在插件设置中修改Excalidraw图像块的标签显示模式。
 
 **Excalidraw代码片段：** 在思源笔记的代码片段中创建CSS/JS代码片段（不必启用），然后在本插件设置中选择其中在Excalidraw中开启的代码片段，实现自定义的功能与样式。可也在[思源社区Excalidraw代码片段集市](https://ld246.com/article/1764004088153)中获取所需代码片段。
+
+**本机字体：** 打开字体选择器，点击 `读取本机字体`，授予浏览器访问权限，然后从 `本机字体` 分组中选择字体。
 
 **嵌入思源内容：**
 
@@ -73,7 +76,7 @@
 **从其他来源迁移：** 
 
 + 方案1：只需要在任意Excalidraw平台导出SVG/PNG图像时勾选 `包含画布数据` 选项，再把SVG图像拖入思源笔记中即可，不用担心以后没法再迁移，这个SVG/PNG图像也是可以导入到任意Excalidraw平台再次编辑的。
-+ 方案2：在任意Excalidraw平台内复制全部内容，在思源笔记中输入 `/excalidraw` 命令创建新Excalidraw图像，然后将复制的内容粘贴进弹出Excalidraw窗口中即可。
++ 方案2：在任意Excalidraw平台内复制全部内容，在思源笔记中输入 `/excalidraw-plus` 命令创建新Excalidraw图像，然后将复制的内容粘贴进弹出Excalidraw窗口中即可。
 
 <details>
 <summary>如果你觉得有用，欢迎请我喝杯咖啡☕</summary>
@@ -82,6 +85,9 @@
 
 ## 更新日志
 
++ v1.1.0
+    + 新增功能：读取并使用本机字体
+    + 调整：建立独立的 PLUS 插件标识
 + v1.0.4
     + 优化：增加全屏切换快捷键
 + v1.0.3
@@ -167,4 +173,3 @@
 + v0.1.0
     + 新增功能：Excalidraw图像以SVG格式存储
     + 新增功能：Excalidraw图像可编辑
-
