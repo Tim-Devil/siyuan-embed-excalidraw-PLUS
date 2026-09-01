@@ -29,7 +29,7 @@ async function renderBlock(blockData: SiyuanBlockData): Promise<void> {
   // 使用 Vditor.preview 渲染 Markdown
   Vditor.preview(previewContainer, blockData.content, {
     mode: 'light',
-    cdn: '/plugins/siyuan-embed-excalidraw/embed/markdown/vditor',
+    cdn: '/plugins/siyuan-embed-excalidraw-plus/embed/markdown/vditor',
     speech: {
       enable: false,
     },

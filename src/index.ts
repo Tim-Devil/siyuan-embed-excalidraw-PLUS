@@ -34,6 +34,7 @@ const {
   version,
 } = PluginInfo
 
+const PLUGIN_ID = "siyuan-embed-excalidraw-plus";
 const STORAGE_NAME = "config.json";
 
 export default class ExcalidrawPlugin extends Plugin {
@@ -55,7 +56,7 @@ export default class ExcalidrawPlugin extends Plugin {
   private _globalKeyDownHandler;
 
   private settingItems: SettingItem[];
-  public EDIT_TAB_TYPE = "excalidraw-edit-tab";
+  public EDIT_TAB_TYPE = "excalidraw-plus-edit-tab";
 
   async onload() {
     this.initMetaInfo();
@@ -108,9 +109,9 @@ export default class ExcalidrawPlugin extends Plugin {
     this.setupEditTab();
 
     this.protyleSlash = [{
-      filter: ["excalidraw"],
-      id: "excalidraw",
-      html: `<div class="b3-list-item__first"><svg class="b3-list-item__graphic"><use xlink:href="#iconImage"></use></svg><span class="b3-list-item__text">Excalidraw</span></div>`,
+      filter: ["excalidraw-plus", "excalidraw plus"],
+      id: "excalidraw-plus",
+      html: `<div class="b3-list-item__first"><svg class="b3-list-item__graphic"><use xlink:href="#iconImage"></use></svg><span class="b3-list-item__text">Excalidraw PLUS</span></div>`,
       callback: (protyle, nodeElement) => {
         this.newExcalidrawImage(protyle, (imageInfo) => {
           if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
@@ -592,10 +593,10 @@ export default class ExcalidrawPlugin extends Plugin {
       type: this.EDIT_TAB_TYPE,
       init() {
         const imageInfo: ExcalidrawImageInfo = this.data;
-        const iframeID = encodeURIComponent(unicodeToBase64(`excalidraw-edit-tab-${imageInfo.imageURL}`));
+        const iframeID = encodeURIComponent(unicodeToBase64(`${PLUGIN_ID}-edit-tab-${imageInfo.imageURL}`));
         const editTabHTML = `
 <div class="excalidraw-edit-tab">
-    <iframe src="/plugins/siyuan-embed-excalidraw/app/?lang=${window.siyuan.config.lang.replace('_', '-')}${that.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${that.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${that.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${that.data[STORAGE_NAME].fullSaveDelay}"></iframe>
+    <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}${that.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${that.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${that.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${that.data[STORAGE_NAME].fullSaveDelay}"></iframe>
 </div>`;
         this.element.innerHTML = editTabHTML;
 
@@ -700,13 +701,13 @@ export default class ExcalidrawPlugin extends Plugin {
   }
 
   public openEditDialog(imageInfo: ExcalidrawImageInfo) {
-    const iframeID = encodeURIComponent(unicodeToBase64(`excalidraw-edit-dialog-${imageInfo.imageURL}`));
+    const iframeID = encodeURIComponent(unicodeToBase64(`${PLUGIN_ID}-edit-dialog-${imageInfo.imageURL}`));
     const editDialogHTML = `
 <div class="excalidraw-edit-dialog">
     <div class="edit-dialog-header resize__move"></div>
     <div class="edit-dialog-container">
         <div class="edit-dialog-editor">
-            <iframe src="/plugins/siyuan-embed-excalidraw/app/?lang=${window.siyuan.config.lang.replace('_', '-')}&fullscreenBtn=1${this.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${this.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${this.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${this.data[STORAGE_NAME].fullSaveDelay}"></iframe>
+            <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}&fullscreenBtn=1${this.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${this.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${this.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${this.data[STORAGE_NAME].fullSaveDelay}"></iframe>
         </div>
         <div class="fn__hr--b"></div>
     </div>
@@ -895,6 +896,6 @@ export default class ExcalidrawPlugin extends Plugin {
   }
 
   private removeTempDir() {
-    fetchPost("/api/file/removeFile", {path: '/temp/siyuan-embed-excalidraw'});
+    fetchPost("/api/file/removeFile", {path: `/temp/${PLUGIN_ID}`});
   }
 }

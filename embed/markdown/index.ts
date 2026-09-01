@@ -21,7 +21,7 @@ function initVditor(markdownData: MarkdownData) {
     // 基础配置
     height: '100%',
     mode: 'ir',
-    cdn: '/plugins/siyuan-embed-excalidraw/embed/markdown/vditor',
+    cdn: '/plugins/siyuan-embed-excalidraw-plus/embed/markdown/vditor',
 
     // 工具栏配置
     toolbar: [

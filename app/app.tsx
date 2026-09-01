@@ -42,8 +42,8 @@ import {
 
 addStyle("/stage/protyle/js/katex/katex.min.css", "protyleKatexStyle");
 
-window.EXCALIDRAW_ASSET_PATH = '/plugins/siyuan-embed-excalidraw/app/';
-window.EXCALIDRAW_LIBRARY_PATH = '/data/storage/petal/siyuan-embed-excalidraw/library.excalidrawlib';
+window.EXCALIDRAW_ASSET_PATH = '/plugins/siyuan-embed-excalidraw-plus/app/';
+window.EXCALIDRAW_LIBRARY_PATH = '/data/storage/petal/siyuan-embed-excalidraw-plus/library.excalidrawlib';
 const urlParams = new URLSearchParams(window.location.search);
 const langCode = urlParams.get('lang') || 'en';
 const enableAutoSave = urlParams.get('enableAutoSave') === 'true';
@@ -75,13 +75,13 @@ const getEmbeddableLink = (element: any): string => {
 
   // 处理 Markdown 链接 (通过检查 customData.embedMarkdown 是否存在)
   if (element?.customData?.embedMarkdown) {
-    return `/plugins/siyuan-embed-excalidraw/embed/markdown/?elementId=${element.id}`;
+    return `/plugins/siyuan-embed-excalidraw-plus/embed/markdown/?elementId=${element.id}`;
   }
 
   // 处理思源块链接
   if (link?.startsWith('siyuan://blocks/')) {
     const blockId = link.split('siyuan://blocks/')[1];
-    return `/plugins/siyuan-embed-excalidraw/embed/siyuan/?elementId=${element.id}&blockId=${blockId}`;
+    return `/plugins/siyuan-embed-excalidraw-plus/embed/siyuan/?elementId=${element.id}&blockId=${blockId}`;
   }
 
   return link;

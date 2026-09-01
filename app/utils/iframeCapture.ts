@@ -22,7 +22,7 @@ export function needsIframeCapture(element: any): boolean {
 export function getIframeForElement(element: any): HTMLIFrameElement | null {
   // Markdown 元素
   if (element?.customData?.embedMarkdown) {
-    const src = `/plugins/siyuan-embed-excalidraw/embed/markdown/?elementId=${element.id}`;
+    const src = `/plugins/siyuan-embed-excalidraw-plus/embed/markdown/?elementId=${element.id}`;
     return document.querySelector(
       `iframe.excalidraw__embeddable[src*="${src}"]`
     ) as HTMLIFrameElement;
@@ -31,7 +31,7 @@ export function getIframeForElement(element: any): HTMLIFrameElement | null {
   // 思源块嵌入（通过 link 中的 blockId 查找）
   if (element?.link?.startsWith('siyuan://blocks/')) {
     const blockId = element.link.split('siyuan://blocks/')[1];
-    const src = `/plugins/siyuan-embed-excalidraw/embed/siyuan/?elementId=${element.id}&blockId=${blockId}`;
+    const src = `/plugins/siyuan-embed-excalidraw-plus/embed/siyuan/?elementId=${element.id}&blockId=${blockId}`;
     return document.querySelector(
       `iframe.excalidraw__embeddable[src*="${src}"]`
     ) as HTMLIFrameElement;
@@ -213,7 +213,7 @@ export async function putIframeCacheMap(imageURL: string, iframeCacheMap: Map<st
   const iframeCacheData = JSON.stringify(cacheData);
   const file = new File([iframeCacheData], `cache-${imageHash}.json`, { type: 'application/json' });
   const formData = new FormData();
-  formData.append('path', `/temp/siyuan-embed-excalidraw/cache/cache-${imageHash}.json`);
+  formData.append('path', `/temp/siyuan-embed-excalidraw-plus/cache/cache-${imageHash}.json`);
   formData.append('file', file);
   formData.append('isDir', 'false');
   await fetch('/api/file/putFile', {
@@ -227,7 +227,7 @@ export async function getIframeCacheMap(imageURL: string): Promise<Map<string, I
   const response = await fetch('/api/file/getFile', {
     method: 'POST',
     body: JSON.stringify({
-      path: `/temp/siyuan-embed-excalidraw/cache/cache-${imageHash}.json`,
+      path: `/temp/siyuan-embed-excalidraw-plus/cache/cache-${imageHash}.json`,
     }),
   });
   if (response.ok && response.status === 200) {

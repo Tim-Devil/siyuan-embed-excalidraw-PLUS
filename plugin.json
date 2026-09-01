@@ -1,8 +1,8 @@
 {
-  "name": "siyuan-embed-excalidraw",
-  "author": "Yuxin Zhao",
-  "url": "https://github.com/YuxinZhaozyx/siyuan-embed-excalidraw",
-  "version": "1.0.4",
+  "name": "siyuan-embed-excalidraw-plus",
+  "author": "Yuxin Zhao, Tim-Devil",
+  "url": "https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS",
+  "version": "1.1.0",
   "minAppVersion": "3.0.0",
   "disabledInPublish": true,
   "backends": [
@@ -12,12 +12,12 @@
     "all"
   ],
   "displayName": {
-    "default": "「Embed Series」Excalidraw",
-    "zh_CN": "「嵌入式系列」Excalidraw"
+    "default": "「Embed Series」Excalidraw PLUS",
+    "zh_CN": "「嵌入式系列」Excalidraw PLUS"
   },
   "description": {
-    "default": "Create editable SVG/PNG Image with Excalidraw",
-    "zh_CN": "使用Excalidraw创建可编辑的SVG/PNG图像"
+    "default": "Create editable SVG/PNG images with Excalidraw and local fonts",
+    "zh_CN": "使用 Excalidraw 和本机字体创建可编辑的 SVG/PNG 图像"
   },
   "readme": {
     "default": "README.md",
