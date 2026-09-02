@@ -37,6 +37,87 @@ const {
 const PLUGIN_ID = "siyuan-embed-excalidraw-plus";
 const STORAGE_NAME = "config.json";
 
+const previewRefreshQueues = new Map<string, Promise<void>>();
+let previewRefreshSequence = 0;
+
+const resolveLocalURL = (value: string): URL => {
+  const localValue = /^[a-z][a-z\d+.-]*:/i.test(value) || value.startsWith('//') || value.startsWith('/')
+    ? value
+    : `/${value}`;
+  return new URL(localValue, window.location.origin + '/');
+};
+
+const getCanonicalImageURL = (value: unknown): URL | null => {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  try {
+    const url = resolveLocalURL(value.trim());
+    if (url.origin !== window.location.origin) return null;
+    url.search = '';
+    url.hash = '';
+    return url;
+  } catch (error) {
+    return null;
+  }
+};
+
+const imageUsesPath = (image: HTMLImageElement, pathname: string): boolean => {
+  const values = [
+    image.dataset.src,
+    image.getAttribute('src'),
+    image.currentSrc,
+  ];
+  return values.some((value) => {
+    if (!value) return false;
+    try {
+      const url = resolveLocalURL(value);
+      return url.origin === window.location.origin && url.pathname === pathname;
+    } catch (error) {
+      return false;
+    }
+  });
+};
+
+const refreshExcalidrawPreview = (message: any): void => {
+  const canonicalURL = getCanonicalImageURL(message?.imageURL);
+  if (!canonicalURL) return;
+
+  const pathname = canonicalURL.pathname;
+  const previousRefresh = previewRefreshQueues.get(pathname) || Promise.resolve();
+  const currentRefresh = previousRefresh
+    .catch(() => undefined)
+    .then(async () => {
+      const refreshToken = `${Date.now()}-${++previewRefreshSequence}`;
+      const refreshedURL = new URL(canonicalURL.href);
+      refreshedURL.searchParams.set('_excalidraw_refresh', refreshToken);
+      const response = await fetch(refreshedURL.href, { cache: 'reload' });
+      if (!response.ok) throw new Error(`preview refresh HTTP ${response.status}`);
+      const refreshedBlob = await response.blob();
+      if (refreshedBlob.size === 0) throw new Error('preview refresh returned an empty image');
+
+      const srcset = `${refreshedURL.href} 1x, ${refreshedURL.href} 2x`;
+      const images = Array.from(document.images).filter((image) => imageUsesPath(image, pathname));
+
+      await Promise.all(images.map(async (image) => {
+        image.setAttribute('srcset', srcset);
+        try {
+          await image.decode();
+        } catch (error) {
+          // Images that are still loading complete through their normal load event.
+        }
+      }));
+    })
+    .catch((error) => {
+      console.warn('Excalidraw preview refresh failed', error);
+    });
+
+  previewRefreshQueues.set(pathname, currentRefresh);
+  void currentRefresh.finally(() => {
+    if (previewRefreshQueues.get(pathname) === currentRefresh) {
+      previewRefreshQueues.delete(pathname);
+    }
+  });
+};
+
 export default class ExcalidrawPlugin extends Plugin {
   // Run as mobile
   public isMobile: boolean
@@ -608,6 +689,43 @@ export default class ExcalidrawPlugin extends Plugin {
           iframe.contentWindow.postMessage(JSON.stringify(message), '*');
         };
 
+        const closeTabNow = this.tab.close.bind(this.tab);
+        let closeRequested = false;
+        let iframeReady = false;
+        let closeMessageSent = false;
+        let closeRequestTimer: ReturnType<typeof setTimeout> | null = null;
+        const closeRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const requestTabClose = () => {
+          if (closeRequested) return;
+          closeRequested = true;
+          if (iframeReady && !closeMessageSent) {
+            closeMessageSent = true;
+            postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+          }
+          closeRequestTimer = setTimeout(() => {
+            closeRequested = false;
+            closeMessageSent = false;
+            closeRequestTimer = null;
+            console.warn('Excalidraw tab close was canceled because saving did not finish');
+          }, 30000);
+        };
+        (this.tab as any).close = requestTabClose;
+        const tabCloseElement = this.tab.headElement?.querySelector('.item__close');
+        const tabCloseClickHandler = (event: MouseEvent) => {
+          if (this.tab.headElement?.classList.contains('item--pin')) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          requestTabClose();
+        };
+        tabCloseElement?.addEventListener('click', tabCloseClickHandler, true);
+        const tabMiddleClickHandler = (event: MouseEvent) => {
+          if (event.button !== 1 || this.tab.headElement?.classList.contains('item--pin')) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          requestTabClose();
+        };
+        this.tab.headElement?.addEventListener('mousedown', tabMiddleClickHandler, true);
+
         const keydownEventHandleer = (event: KeyboardEvent) => {
           that.tabHotKeyEventHandler(event, this);
         };
@@ -616,24 +734,35 @@ export default class ExcalidrawPlugin extends Plugin {
         }
 
         const onReady = (message: any) => {
+          iframeReady = true;
           that.injectSnippetsToIframe(iframe);
+          if (closeRequested && !closeMessageSent) {
+            closeMessageSent = true;
+            postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+          }
         }
 
         const onSave = (message: any) => {
-          const imageURL = message.imageURL;
-          fetch(imageURL, { cache: 'reload' }).then(() => {
-            document.querySelectorAll(`img[src='${imageURL}']`).forEach(imageElement => {
-              (imageElement as HTMLImageElement).src = imageURL;
-            });
-          });
+          refreshExcalidrawPreview(message);
         }
 
         const onBrowseLibrary = (message: any) => {
-          this.tab.close();
+          closeTabNow();
         };
 
         const onExit = (message: any) => {
-          this.tab.close();
+          closeTabNow();
+        };
+
+        const onSaveFailed = (message: any) => {
+          if (message.requestId !== closeRequestId) return;
+          closeRequested = false;
+          closeMessageSent = false;
+          if (closeRequestTimer) {
+            clearTimeout(closeRequestTimer);
+            closeRequestTimer = null;
+          }
+          console.warn('Excalidraw tab close was canceled because saving failed');
         };
 
         const onTriggleHoverBlock = (message: any) => {
@@ -648,7 +777,7 @@ export default class ExcalidrawPlugin extends Plugin {
         }
 
         const messageEventHandler = (event) => {
-          if (!((event.source.location.href as string).includes(`iframeID=${iframeID}`))) return;
+          if (event.source !== iframe.contentWindow) return;
           if (event.data && event.data.length > 0) {
             try {
               var message = JSON.parse(event.data);
@@ -660,7 +789,7 @@ export default class ExcalidrawPlugin extends Plugin {
                 else if (message.event == "ready") {
                   onReady(message);
                 }
-                else if (message.event == "save" || message.event == "autosave") {
+                else if (message.event == "save") {
                   onSave(message);
                 }
                 else if (message.event == "browseLibrary") {
@@ -668,6 +797,9 @@ export default class ExcalidrawPlugin extends Plugin {
                 }
                 else if (message.event == "exit") {
                   onExit(message);
+                }
+                else if (message.event == "saveFailed") {
+                  onSaveFailed(message);
                 }
                 else if (message.event == 'triggleHoverBlock') {
                   onTriggleHoverBlock(message);
@@ -683,6 +815,10 @@ export default class ExcalidrawPlugin extends Plugin {
         window.addEventListener("message", messageEventHandler);
         this.beforeDestroy = () => {
           window.removeEventListener("message", messageEventHandler);
+          tabCloseElement?.removeEventListener('click', tabCloseClickHandler, true);
+          this.tab.headElement?.removeEventListener('mousedown', tabMiddleClickHandler, true);
+          (this.tab as any).close = closeTabNow;
+          if (closeRequestTimer) clearTimeout(closeRequestTimer);
         };
       }
     });
@@ -734,27 +870,60 @@ export default class ExcalidrawPlugin extends Plugin {
       iframe.contentWindow.postMessage(JSON.stringify(message), '*');
     };
 
+    const destroyDialogNow = dialog.destroy.bind(dialog);
+    let closeRequested = false;
+    let iframeReady = false;
+    let closeMessageSent = false;
+    let closeRequestTimer: ReturnType<typeof setTimeout> | null = null;
+    const closeRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestDialogClose = () => {
+      if (closeRequested) return;
+      closeRequested = true;
+      if (iframeReady && !closeMessageSent) {
+        closeMessageSent = true;
+        postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+      }
+      closeRequestTimer = setTimeout(() => {
+        closeRequested = false;
+        closeMessageSent = false;
+        closeRequestTimer = null;
+        console.warn('Excalidraw close was canceled because saving did not finish');
+      }, 30000);
+    };
+    (dialog as any).destroy = requestDialogClose;
+
     const onInit = (message: any) => {}
 
     const onReady = (message: any) => {
+      iframeReady = true;
       this.injectSnippetsToIframe(iframe);
+      if (closeRequested && !closeMessageSent) {
+        closeMessageSent = true;
+        postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+      }
     }
 
     const onSave = (message: any) => {
-      const imageURL = message.imageURL;
-      fetch(imageURL, { cache: 'reload' }).then(() => {
-        document.querySelectorAll(`img[src='${imageURL}']`).forEach(imageElement => {
-          (imageElement as HTMLImageElement).src = imageURL;
-        });
-      });
+      refreshExcalidrawPreview(message);
     }
 
     const onBrowseLibrary = (message: any) => {
-      dialog.destroy();
+      destroyDialogNow();
     };
 
     const onExit = (message: any) => {
-      dialog.destroy();
+      destroyDialogNow();
+    };
+
+    const onSaveFailed = (message: any) => {
+      if (message.requestId !== closeRequestId) return;
+      closeRequested = false;
+      closeMessageSent = false;
+      if (closeRequestTimer) {
+        clearTimeout(closeRequestTimer);
+        closeRequestTimer = null;
+      }
+      console.warn('Excalidraw close was canceled because saving failed');
     };
 
     const onTriggleHoverBlock = (message: any) => {
@@ -809,7 +978,7 @@ export default class ExcalidrawPlugin extends Plugin {
     }
 
     const messageEventHandler = (event) => {
-      if (!((event.source.location.href as string).includes(`iframeID=${iframeID}`))) return;
+      if (event.source !== iframe.contentWindow) return;
       if (event.data && event.data.length > 0) {
         try {
           var message = JSON.parse(event.data);
@@ -821,7 +990,7 @@ export default class ExcalidrawPlugin extends Plugin {
             else if (message.event == "ready") {
               onReady(message);
             }
-            else if (message.event == "save" || message.event == "autosave") {
+            else if (message.event == "save") {
               onSave(message);
             }
             else if (message.event == "browseLibrary") {
@@ -829,6 +998,9 @@ export default class ExcalidrawPlugin extends Plugin {
             }
             else if (message.event == "exit") {
               onExit(message);
+            }
+            else if (message.event == "saveFailed") {
+              onSaveFailed(message);
             }
             else if (message.event == "toggleFullscreen") {
               switchFullscreen();
@@ -847,6 +1019,8 @@ export default class ExcalidrawPlugin extends Plugin {
     window.addEventListener("message", messageEventHandler);
     dialogDestroyCallbacks.push(() => {
       window.removeEventListener("message", messageEventHandler);
+      if (closeRequestTimer) clearTimeout(closeRequestTimer);
+      (dialog as any).destroy = destroyDialogNow;
     });
   }
 

@@ -28,7 +28,6 @@ import {
   getSVGSize,
   getPNGSize,
 } from '../src/utils';
-import { fetchPost } from '../src/utils/fetch';
 import { isMac, matchHotKey, updateHotkeyTip } from '../src/utils/hotkey';
 import defaultImageContent from "../src/default.json";
 import { nanoid } from "nanoid";
@@ -49,12 +48,23 @@ const langCode = urlParams.get('lang') || 'en';
 const enableAutoSave = urlParams.get('enableAutoSave') === 'true';
 const autoSaveInterval = Math.max(parseInt(urlParams.get('autoSaveInterval') || '0') * 1000, 300);
 const fullSaveDelay = Math.max(parseInt(urlParams.get('fullSaveDelay') || '0') * 1000, 300);
+type SaveEventName = 'save' | 'autosave';
+
+type SaveRequest = {
+  eventName: SaveEventName;
+  forceFocus: boolean;
+  resolve: (success: boolean) => void;
+};
+
 let saveStatus = {
   fullSave: true,
   saving: false,
 };
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
-const saveTimeout = 10_000;
+let sceneGeneration = 0;
+let saveSequence = 0;
+let saveWorker: Promise<void> | null = null;
+const pendingFullSaves: SaveRequest[] = [];
+const pendingAutoSaves: SaveRequest[] = [];
 let mimeType = 'image/svg+xml';
 let imageURL = '';
 const exportPadding = 10;
@@ -343,70 +353,158 @@ const renderImageContentWithMetadataAndImage = async (): Promise<Blob> => {
   return blob;
 }
 
-const setSavingBegin = (fullSave: boolean): boolean => {
-  if (saveStatus.saving) return false;
+const putImageFile = async (formData: FormData): Promise<void> => {
+  const response = await fetch('/api/file/putFile', {
+    method: 'POST',
+    body: formData,
+  });
+  const responseText = await response.text();
+  let result: any = null;
+  if (responseText) {
+    try {
+      result = JSON.parse(responseText);
+    } catch (error) {
+      // SiYuan versions with an empty or plain-text success response remain valid.
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`putFile HTTP ${response.status}`);
+  }
+  if (result && typeof result.code === 'number' && result.code !== 0) {
+    throw new Error(`putFile API ${result.code}: ${result.msg || 'unknown error'}`);
+  }
+};
+
+const notifySave = (eventName: SaveEventName): void => {
+  saveSequence += 1;
+  postMessage({
+    event: eventName,
+    imageURL: imageURL,
+    saveId: `${Date.now()}-${saveSequence}`,
+  });
+};
+
+const persistSave = async (eventName: SaveEventName, forceFocus: boolean): Promise<boolean> => {
+  if (!window.excalidrawAPI) return false;
+  if (!forceFocus && !document.hasFocus()) {
+    if (eventName === 'save') triggleToast('savecancel');
+    return false;
+  }
+
+  const previousSavedSvg = savedSvg?.cloneNode(true) as HTMLElement | null;
+  const previousSavedPngBinaryArray = savedPngBinaryArray?.slice() || null;
+  const previousIframeCacheMap = new Map(iframeCacheMap);
+  let writeSucceeded = false;
   saveStatus.saving = true;
-  if (fullSave) saveStatus.fullSave = true;
-  // saveTimer = setTimeout(() => {
-  //   saveStatus.saving = false;
-  //   if (fullSave) saveStatus.fullSave = false;
-  //   saveTimer = null;
-  //   triggleToast("savetimeout");
-  // }, saveTimeout);
-  return true;
-}
-
-const setSavingEnd = () => {
-  saveStatus.saving = false;
-  // if (saveTimer !== null) {
-  //   clearTimeout(saveTimer as unknown as number);
-  // }
-}
-
-const save = async (eventName: 'save' | 'autosave') => {
-  if (!window.excalidrawAPI) return;
-  if (!document.hasFocus()) return;
-
-  if (!setSavingBegin(eventName === 'save')) return;
-  // console.log(`${eventName} start`);
-  // console.time(eventName);
-
   if (eventName === 'save') triggleToast('saving');
 
-  let blob: Blob | null = null;
-  if (eventName === 'save') {
-    blob = await renderImageContentWithMetadataAndImage();
-  } else {
-    blob = await renderImageContentWithOnlyMetadata();
+  try {
+    const blob = eventName === 'save'
+      ? await renderImageContentWithMetadataAndImage()
+      : await renderImageContentWithOnlyMetadata();
+
+    if (!forceFocus && !document.hasFocus()) {
+      if (eventName === 'save') triggleToast('savecancel');
+      return false;
+    }
+
+    const file = new File([blob], imageURL.split('/').pop()!, { type: blob.type });
+    const formData = new FormData();
+    formData.append('path', 'data/' + imageURL);
+    formData.append('file', file);
+    formData.append('isDir', 'false');
+    await putImageFile(formData);
+    writeSucceeded = true;
+
+    return true;
+  } catch (error) {
+    console.error(`Excalidraw ${eventName} failed`, error);
+    if (eventName === 'save') {
+      saveStatus.fullSave = false;
+      triggleToast('savetimeout');
+    }
+    return false;
+  } finally {
+    if (!writeSucceeded) {
+      savedSvg = previousSavedSvg;
+      savedPngBinaryArray = previousSavedPngBinaryArray;
+      iframeCacheMap = previousIframeCacheMap;
+    }
+    saveStatus.saving = false;
   }
+};
 
-  // ========== 第三步：保存 ==========
-  if (!document.hasFocus()) {
-    // 当窗口未聚焦时，直接放弃保存，避免窗口里的iframe抖动导致渲染为空白
-    setSavingEnd();
-    if (eventName === 'save') triggleToast('savecancel');
-    return;
+const drainSaveQueue = async (): Promise<void> => {
+  while (pendingFullSaves.length > 0 || pendingAutoSaves.length > 0) {
+    const isFullSave = pendingFullSaves.length > 0;
+    const requests = (isFullSave ? pendingFullSaves : pendingAutoSaves).splice(0);
+    const generationAtStart = sceneGeneration;
+    const forceFocus = requests.some(request => request.forceFocus);
+    let success = false;
+    try {
+      success = await persistSave(isFullSave ? 'save' : 'autosave', forceFocus);
+    } catch (error) {
+      console.error('Excalidraw save queue failed', error);
+      if (isFullSave) saveStatus.fullSave = false;
+    }
+
+    if (isFullSave && success && sceneGeneration !== generationAtStart) {
+      // Changes made during export or upload require a fresh full raster.
+      pendingFullSaves.unshift(...requests);
+      continue;
+    }
+
+    requests.forEach(request => request.resolve(success));
+
+    if (isFullSave && success && sceneGeneration === generationAtStart) {
+      notifySave('save');
+      triggleToast('savedone');
+      saveStatus.fullSave = true;
+      // A full save already contains the metadata requested by queued autosaves.
+      const redundantAutoSaves = pendingAutoSaves.splice(0);
+      redundantAutoSaves.forEach(request => request.resolve(true));
+    } else if (isFullSave && !success) {
+      // Metadata-only writes cannot represent a failed full raster save.
+      const canceledAutoSaves = pendingAutoSaves.splice(0);
+      canceledAutoSaves.forEach(request => request.resolve(false));
+    } else if (!isFullSave && success) {
+      notifySave('autosave');
+    }
   }
+};
 
-  const file = new File([blob], imageURL.split('/').pop()!, { type: blob.type });
-  const formData = new FormData();
-  formData.append("path", 'data/' + imageURL);
-  formData.append("file", file);
-  formData.append("isDir", "false");
-
-  fetchPost("/api/file/putFile", formData, () => {
-    postMessage({
-      event: eventName,
-      imageURL: imageURL,
-    });
+const startSaveWorker = (): void => {
+  if (saveWorker) return;
+  saveWorker = drainSaveQueue().finally(() => {
+    saveWorker = null;
+    if (pendingFullSaves.length > 0 || pendingAutoSaves.length > 0) {
+      startSaveWorker();
+    }
   });
+};
 
-  setSavingEnd();
-  if (eventName === 'save') triggleToast('savedone');
+const save = (eventName: SaveEventName, options: { forceFocus?: boolean } = {}): Promise<boolean> => {
+  const forceFocus = options.forceFocus === true;
+  if (!window.excalidrawAPI) return Promise.resolve(false);
+  if (!forceFocus && !document.hasFocus()) return Promise.resolve(false);
 
-  // console.log(`${eventName} end`);
-  // console.timeEnd(eventName);
-}
+  return new Promise<boolean>((resolve) => {
+    const request = { eventName, forceFocus, resolve };
+    if (eventName === 'save') {
+      pendingFullSaves.push(request);
+    } else {
+      pendingAutoSaves.push(request);
+    }
+
+    startSaveWorker();
+  });
+};
+
+const saveAndExit = async (): Promise<void> => {
+  const success = await save('save', { forceFocus: true });
+  if (success) postMessage({ event: 'exit' });
+};
 
 const openLink = (element: any, event: CustomEvent<{ nativeEvent: MouseEvent | React.PointerEvent<HTMLCanvasElement>; }>) => {
   event.preventDefault();
@@ -442,17 +540,17 @@ const App = (props: { initialData: any }) => {
   let lastAutoSaveTime = 0;
   const debouncedAutoSave = debounce(() => {
     let currentTime = Date.now();
-    if (!saveStatus.saving && currentTime - lastAutoSaveTime > autoSaveInterval) {
+    if (currentTime - lastAutoSaveTime > autoSaveInterval) {
       lastAutoSaveTime = currentTime;
-      save("autosave");
+      void save("autosave");
       lastAutoSaveTime = Date.now();
     }
   }, 300);
 
   // 一段时间没有修改才完整保存
   const debouncedSave = debounce(() => {
-    if (!saveStatus.fullSave && !saveStatus.saving && !window.excalidrawAPI.getAppState().activeEmbeddable) {
-      save("save");
+    if (!saveStatus.fullSave && !window.excalidrawAPI.getAppState().activeEmbeddable) {
+      void save("save");
     }
   }, fullSaveDelay);
 
@@ -469,6 +567,7 @@ const App = (props: { initialData: any }) => {
     const versionNonceSum = window.excalidrawAPI.getSceneElements().reduce((sum: number, element: any) => sum + element.versionNonce, 0);
     if (versionNonceSum !== lastVersionNonceSum) {
       lastVersionNonceSum = versionNonceSum;
+      sceneGeneration += 1;
       saveStatus.fullSave = false;
 
       // 只有启用自动保存时才执行防抖保存
@@ -527,7 +626,7 @@ const App = (props: { initialData: any }) => {
         </MainMenu.Item>
         <MainMenu.Item
           icon={<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="7082" width="32" height="32"><path d="M928 896V314.24c0-8.32-3.488-16.64-9.6-22.72l-187.84-186.24a31.36 31.36 0 0 0-22.4-9.28H672v160c0 52.8-43.2 96-96 96H256c-52.8 0-96-43.2-96-96V96H128c-17.6 0-32 14.4-32 32v768c0 17.6 14.4 32 32 32h64v-288c0-52.8 43.2-96 96-96h448c52.8 0 96 43.2 96 96v288h64c17.632 0 32-14.4 32-32z m-160 32v-288c0-17.6-14.368-32-32-32H288c-17.6 0-32 14.4-32 32v288h512zM224 96v160c0 17.6 14.4 32 32 32h320c17.632 0 32-14.4 32-32V96H224z m739.52 150.08c18.272 17.92 28.48 42.88 28.48 68.16V896c0 52.8-43.2 96-96 96H128c-52.8 0-96-43.2-96-96V128c0-52.8 43.2-96 96-96h580.16c25.632 0 49.632 9.92 67.52 27.84l187.84 186.24zM512 256a32 32 0 0 1-32-32V160a32 32 0 0 1 64 0v64a32 32 0 0 1-32 32z" fill="#404853" p-id="7083"></path></svg>}
-          onSelect={() => { save("save"); }}
+          onSelect={() => { void save("save"); }}
           shortcut={updateHotkeyTip('⌘S')}
         >{langCode.startsWith('zh') ? '保存' : 'Save'}
         </MainMenu.Item>
@@ -535,7 +634,7 @@ const App = (props: { initialData: any }) => {
         <MainMenu.DefaultItems.SearchMenu />
         <MainMenu.Item
           icon={<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="5086" width="32" height="32"><path d="M768 640 768 512 448 512 448 384 768 384 768 256 960 448ZM704 576 704 832 384 832 384 1024 0 832 0 0 704 0 704 320 640 320 640 64 128 64 384 192 384 768 640 768 640 576Z" fill="#000000" p-id="5087"></path></svg>}
-          onSelect={() => { postMessage({ event: 'exit' }); }}
+          onSelect={() => { void saveAndExit(); }}
         >{langCode.startsWith('zh') ? '退出' : 'Exit'}
         </MainMenu.Item>
         {
@@ -590,15 +689,20 @@ const load = async () => {
 };
 
 const messageHandler = (event: MessageEvent) => {
-  if (event.data && event.data.length > 0) {
-    try {
-      var message = JSON.parse(event.data);
-      if (message != null) {
-      }
+  if (event.source !== window.parent || typeof event.data !== 'string' || event.data.length === 0) return;
+  try {
+    const message = JSON.parse(event.data);
+    if (message?.event === 'saveAndExit') {
+      void save('save', { forceFocus: true }).then((success) => {
+        postMessage({
+          event: success ? 'exit' : 'saveFailed',
+          requestId: message.requestId,
+        });
+      });
     }
-    catch (err) {
-      console.error(err);
-    }
+  }
+  catch (err) {
+    console.error(err);
   }
 }
 
@@ -785,7 +889,7 @@ if (libraryUrlTokens) {
 window.addEventListener('keydown', (event: KeyboardEvent) => {
   if (matchHotKey('⌘S', event)) {
     event.preventDefault();
-    if (!saveStatus.saving && !window.excalidrawAPI.getAppState().activeEmbeddable) save("save");
+    if (!window.excalidrawAPI.getAppState().activeEmbeddable) void save("save");
   } else if (matchHotKey('⌥Y', event)) {
     event.preventDefault();
     postMessage({ event: 'toggleFullscreen' });
