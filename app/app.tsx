@@ -964,7 +964,18 @@ const loadLibary = async () => {
         path: window.EXCALIDRAW_LIBRARY_PATH,
       }),
     }, 5000);
-    if (!response.ok) return libraryItems;
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      const result = JSON.parse(await blob.text()) as { code?: unknown; msg?: unknown };
+      if (typeof result?.code === 'number') {
+        if (result.code === 404) return libraryItems;
+        throw new Error(
+          typeof result.msg === 'string' && result.msg
+            ? result.msg
+            : `library API error ${result.code}`,
+        );
+      }
+    }
+    if (!response.ok) throw new Error(`library HTTP ${response.status}`);
     libraryItems = await loadLibraryFromBlob(blob);
   } catch (error) {
     console.warn('Failed to load Excalidraw library', error);
