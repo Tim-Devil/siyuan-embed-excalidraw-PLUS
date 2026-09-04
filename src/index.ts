@@ -196,6 +196,30 @@ const getExcalidrawImagePath = (
   return "";
 };
 
+const findExcalidrawImage = (
+  root: Element | null | undefined,
+  preferredImage: HTMLImageElement | null = null,
+  expectedPath = "",
+): HTMLImageElement | null => {
+  if (!root?.isConnected) return null;
+
+  const candidates = root instanceof HTMLImageElement
+    ? [root]
+    : Array.from(root.querySelectorAll<HTMLImageElement>("img"));
+  const preferredPath = preferredImage && candidates.includes(preferredImage)
+    ? getExcalidrawImagePath(preferredImage)
+    : "";
+  if (preferredPath && (!expectedPath || preferredPath === expectedPath)) {
+    return preferredImage;
+  }
+
+  const matchingImage = candidates.find((image) => {
+    const imagePath = getExcalidrawImagePath(image);
+    return Boolean(imagePath) && (!expectedPath || imagePath === expectedPath);
+  });
+  return matchingImage ?? null;
+};
+
 const imageUsesPath = (
   image: HTMLImageElement | null | undefined,
   pathname: string,
@@ -379,16 +403,17 @@ export default class ExcalidrawPlugin extends Plugin {
     await this.initSetting();
 
     this._mutationObserver = this.setAddImageBlockMuatationObserver(document.body, (blockElement: HTMLElement) => {
-      const imageElement = Array.from(blockElement.querySelectorAll<HTMLImageElement>("img"))
-        .find((image) => Boolean(getExcalidrawImagePath(image)));
+      const imageElement = findExcalidrawImage(blockElement);
       if (imageElement) {
         const imageURL = getExcalidrawImagePath(imageElement);
         if (!imageURL) return;
         const refreshed = applyPendingPreviewRefresh(imageElement);
         this.getExcalidrawImageInfo(imageURL, refreshed).then((imageInfo) => {
-          const currentImageElement = Array.from(
-            blockElement.querySelectorAll<HTMLImageElement>("img"),
-          ).find((image) => getExcalidrawImagePath(image) === imageURL) ?? null;
+          const currentImageElement = findExcalidrawImage(
+            blockElement,
+            imageElement,
+            imageURL,
+          );
           if (
             imageInfo &&
             blockElement.isConnected &&
@@ -408,14 +433,13 @@ export default class ExcalidrawPlugin extends Plugin {
                   event.stopPropagation();
                   // Resolve the image at click time so a refreshed block never
                   // opens the URL captured during the first mutation.
-                  const currentImageElement = Array.from(
-                    blockElement.querySelectorAll<HTMLImageElement>("img"),
-                  ).find((image) => Boolean(getExcalidrawImagePath(image))) ?? null;
-                  const imageURL = getExcalidrawImagePath(
-                    currentImageElement || blockElement.querySelector("img"),
+                  const currentImageElement = findExcalidrawImage(
+                    blockElement,
+                    imageElement,
                   );
-                  if (!imageURL) return;
-                  this.getExcalidrawImageInfo(imageURL, false).then((imageInfo) => {
+                  const currentImageURL = getExcalidrawImagePath(currentImageElement);
+                  if (!currentImageURL) return;
+                  this.getExcalidrawImageInfo(currentImageURL, true).then((imageInfo) => {
                     if (!imageInfo) return;
                     if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
                       this.openEditTab(imageInfo);
@@ -1007,22 +1031,14 @@ export default class ExcalidrawPlugin extends Plugin {
 
   private openMenuImageHandler(event: any) {
     const selectedElement = event?.detail?.element as HTMLElement | undefined;
-    const imageElement = selectedElement?.matches?.("img")
-      ? selectedElement as HTMLImageElement
-      : selectedElement?.querySelector("img") as HTMLImageElement | null;
+    const imageElement = findExcalidrawImage(selectedElement);
     const imageURL = imageElement ? getExcalidrawImagePath(imageElement) : "";
     if (!imageURL) return;
     const menu = window.siyuan.menus.menu;
-    const selectionRoot = imageElement?.closest("[data-node-id]") as HTMLElement | null
-      || selectedElement;
+    const blockRoot = imageElement.closest("[data-node-id]") as HTMLElement | null;
     const getCurrentImage = (): HTMLImageElement | null => {
-      if (!selectionRoot?.isConnected) return null;
-      if (selectionRoot instanceof HTMLImageElement) return selectionRoot;
-      return Array.from(
-        selectionRoot.querySelectorAll<HTMLImageElement>(
-          ".img[data-type='img'] img, img",
-        ),
-      ).find((image) => Boolean(getExcalidrawImagePath(image))) ?? null;
+      return findExcalidrawImage(selectedElement, imageElement, imageURL)
+        ?? findExcalidrawImage(blockRoot, imageElement, imageURL);
     };
     this.getExcalidrawImageInfo(imageURL, true).then((imageInfo: ExcalidrawImageInfo) => {
       const currentImageElement = getCurrentImage();
