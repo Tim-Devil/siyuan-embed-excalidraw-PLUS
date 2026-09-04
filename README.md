@@ -88,6 +88,10 @@ The label of an Excalidraw image block can be configured in the plugin settings.
 
 ## Changelog
 
++ v1.1.1
+    + Fix: reliably refresh embedded SVG/PNG previews after saving
+    + Fix: preserve embedded content and configuration during transient updates
+    + Optimize: remember text font/size and load local fonts in the independent PLUS fork
 + v1.1.0
     + Feature: load and use local system fonts
     + Change: establish an independent PLUS plugin identity

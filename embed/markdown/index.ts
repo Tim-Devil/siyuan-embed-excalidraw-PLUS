@@ -10,6 +10,20 @@ const elementId = urlParams.get('elementId');
 
 let vditor: Vditor | null = null;
 let currentMarkdownData: MarkdownData | null = null;
+const debouncedInput = debounce((value: string) => {
+  if (elementId && currentMarkdownData) {
+    currentMarkdownData.content = value;
+    updateElementData(elementId, currentMarkdownData);
+  }
+}, 300);
+
+const flushPendingInput = (): void => {
+  debouncedInput.flush();
+};
+const markdownWindow = window as Window & {
+  __EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__?: () => void;
+};
+markdownWindow.__EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__ = flushPendingInput;
 
 /**
  * 初始化 Vditor 编辑器
@@ -69,12 +83,7 @@ function initVditor(markdownData: MarkdownData) {
     },
 
     // 输入回调 - 直接更新父页面数据
-    input: debounce((value: string) => {
-      if (elementId && currentMarkdownData) {
-        currentMarkdownData.content = value;
-        updateElementData(elementId, currentMarkdownData);
-      }
-    }, 300),
+    input: debouncedInput,
 
     // 初始化完成回调
     after: () => {
@@ -121,6 +130,11 @@ if (!loadData()) {
 
 // 页面卸载时清理
 window.addEventListener('unload', () => {
+  flushPendingInput();
+  debouncedInput.cancel();
+  if (markdownWindow.__EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__ === flushPendingInput) {
+    delete markdownWindow.__EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__;
+  }
   if (vditor) {
     vditor.destroy();
   }

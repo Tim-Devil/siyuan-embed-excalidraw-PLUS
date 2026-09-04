@@ -265,21 +265,25 @@ export function arrayToBase64(array: Uint8Array): string {
   return btoa(binary);
 }
 
-export function locatePNGtEXt(data: Uint8Array): { index: number; length: number } | null {
+type PNGChunkLocation = { index: number; length: number };
+
+const locatePNGChunk = (
+  data: Uint8Array,
+  chunkType: string,
+  keyword?: string,
+): PNGChunkLocation | null => {
   if (data.length < 8) return null;
 
-  // 检查 PNG 文件头（可选，但推荐）
   const pngSignature = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   for (let i = 0; i < 8; i++) {
     if (data[i] !== pngSignature[i]) {
-      return null; // 不是合法 PNG
+      return null;
     }
   }
 
-  let offset = 8; // 跳过签名
+  let offset = 8;
 
   while (offset <= data.length - 12) {
-    // 读取 Length（大端序，4字节）
     const length = (
       (data[offset] << 24) |
       (data[offset + 1] << 16) |
@@ -287,25 +291,39 @@ export function locatePNGtEXt(data: Uint8Array): { index: number; length: number
       data[offset + 3]
     ) >>> 0;
 
-    // 检查是否超出文件边界
     if (offset + 12 + length > data.length) {
-      break; // chunk 不完整
+      return null;
     }
 
-    // 读取 Chunk Type（4字节）
     const typeBytes = data.subarray(offset + 4, offset + 8);
     const typeStr = String.fromCharCode(...typeBytes);
 
-    if (typeStr === 'tEXt') {
-      // 找到 tEXt chunk
-      return { index: offset, length: 12 + length };
+    if (typeStr === chunkType) {
+      if (chunkType !== 'tEXt' || typeof keyword === 'undefined') {
+        return { index: offset, length: 12 + length };
+      }
+
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      let separator = dataStart;
+      while (separator < dataEnd && data[separator] !== 0) separator += 1;
+      const chunkKeyword = String.fromCharCode(...data.subarray(dataStart, separator));
+      if (chunkKeyword === keyword) {
+        return { index: offset, length: 12 + length };
+      }
     }
 
-    // 跳到下一个 chunk（12 = 4 Length + 4 Type + 4 CRC）
     offset += 12 + length;
   }
 
-  return null; // 未找到 tEXt
+  return null;
+};
+
+export function locatePNGtEXt(
+  data: Uint8Array,
+  keyword?: string,
+): PNGChunkLocation | null {
+  return locatePNGChunk(data, 'tEXt', keyword);
 }
 
 export function replaceSubArray(
@@ -348,6 +366,39 @@ export function replaceSubArray(
   result.set(destArray.subarray(afterDestIndex), afterSrcIndex);
 
   return result;
+}
+
+export function upsertPNGtEXt(
+  metadataSource: Uint8Array,
+  imageData: Uint8Array,
+  keyword: string,
+): Uint8Array {
+  const sourceLocation = locatePNGtEXt(metadataSource, keyword);
+  if (!sourceLocation) {
+    throw new Error(`PNG metadata chunk is missing: ${keyword}`);
+  }
+
+  const destinationLocation = locatePNGtEXt(imageData, keyword);
+  if (destinationLocation) {
+    return replaceSubArray(
+      metadataSource,
+      sourceLocation,
+      imageData,
+      destinationLocation,
+    );
+  }
+
+  const iendLocation = locatePNGChunk(imageData, 'IEND');
+  if (!iendLocation) {
+    throw new Error('PNG IEND chunk is missing');
+  }
+
+  return replaceSubArray(
+    metadataSource,
+    sourceLocation,
+    imageData,
+    { index: iendLocation.index, length: 0 },
+  );
 }
 
 export function insertPNGpHYs(data: Uint8Array, dpi: number): Uint8Array {

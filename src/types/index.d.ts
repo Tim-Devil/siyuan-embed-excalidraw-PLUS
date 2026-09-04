@@ -113,6 +113,9 @@ type doOperation = {
 
 interface Window {
   siyuan: {
+    reqIds: {
+      [key: string]: number;
+    };
     notebooks: any;
     menus: {
       menu: Menu;

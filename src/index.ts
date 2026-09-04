@@ -14,10 +14,13 @@ import "@/index.scss";
 import PluginInfoString from '@/../plugin.json';
 import {
   base64ToUnicode,
+  base64ToArray,
   unicodeToBase64,
   blobToDataURL,
   dataURLToBlob,
   HTMLToElement,
+  escapeHTML,
+  locatePNGtEXt,
 } from "@/utils";
 import { matchHotKey, getCustomHotKey } from "./utils/hotkey";
 import defaultImageContent from "@/default.json";
@@ -36,9 +39,88 @@ const {
 
 const PLUGIN_ID = "siyuan-embed-excalidraw-plus";
 const STORAGE_NAME = "config.json";
+const TEXT_STYLE_STORAGE_KEY = `${PLUGIN_ID}:text-style:v1`;
+const LOCAL_FONT_STORAGE_KEY = `${PLUGIN_ID}:local-fonts:v1`;
+const CLOSE_SAVE_TIMEOUT_MS = 60000;
+const MAX_PREVIEW_REFRESH_TOKENS = 256;
+
+const parseNonNegativeNumber = (value: unknown, fallback: number): number => {
+  const candidate = typeof value === "string" ? value.trim() : value;
+  if (candidate === "") return fallback;
+  const parsed = typeof candidate === "number" ? candidate : Number(candidate);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+const normalizeAssetImagePath = (value: unknown): string => {
+  if (typeof value !== "string" || value.trim().length === 0) return "";
+  const candidate = value.trim();
+  try {
+    const url = new URL(
+      candidate,
+      candidate.startsWith("/") ? window.location.origin : `${window.location.origin}/`,
+    );
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/assets/")) {
+      return "";
+    }
+    return url.pathname.slice(1);
+  } catch (error) {
+    return "";
+  }
+};
+
+const fetchBlobWithTimeout = async (
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 15000,
+): Promise<{ response: Response; blob: Blob }> => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+    const blob = await response.blob();
+    return { response, blob };
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
+const putFile = async (formData: FormData, timeoutMs = 30000): Promise<void> => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch("/api/file/putFile", {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    });
+    const responseText = await response.text();
+    let result: any = null;
+    if (responseText) {
+      try {
+        result = JSON.parse(responseText);
+      } catch (error) {
+        // Older SiYuan versions can return an empty or plain-text success body.
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(`putFile HTTP ${response.status}`);
+    }
+    if (result && typeof result.code === "number" && result.code !== 0) {
+      throw new Error(`putFile API ${result.code}: ${result.msg || "unknown error"}`);
+    }
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
 
 const previewRefreshQueues = new Map<string, Promise<void>>();
+const previewRefreshTokens = new Map<string, string>();
 let previewRefreshSequence = 0;
+let previewRefreshLifecycle = 0;
 
 const resolveLocalURL = (value: string): URL => {
   const localValue = /^[a-z][a-z\d+.-]*:/i.test(value) || value.startsWith('//') || value.startsWith('/')
@@ -60,13 +142,65 @@ const getCanonicalImageURL = (value: unknown): URL | null => {
   }
 };
 
-const imageUsesPath = (image: HTMLImageElement, pathname: string): boolean => {
-  const values = [
-    image.dataset.src,
-    image.getAttribute('src'),
+const IMAGE_SOURCE_ATTRIBUTES = [
+  'src',
+  'data-src',
+  'data-original',
+  'data-lazy-src',
+] as const;
+const IMAGE_SRCSET_ATTRIBUTES = ['srcset', 'data-srcset'] as const;
+
+const getSourceSetValues = (sourceSet: string | null): string[] => (
+  (sourceSet || '')
+    .split(',')
+    .map((candidate) => candidate.trim().split(/\s+/)[0])
+    .filter((value): value is string => Boolean(value))
+);
+
+const getImageSourceValues = (
+  image: HTMLImageElement | null | undefined,
+): string[] => {
+  if (!image) return [];
+
+  return [
+    ...IMAGE_SOURCE_ATTRIBUTES.map((attribute) => image.getAttribute(attribute)),
     image.currentSrc,
-  ];
-  return values.some((value) => {
+    ...IMAGE_SRCSET_ATTRIBUTES.flatMap((attribute) =>
+      getSourceSetValues(image.getAttribute(attribute))),
+  ].filter((value): value is string => Boolean(value));
+};
+
+const getCanonicalImageElementURLs = (image: HTMLImageElement): URL[] => {
+  const urls: URL[] = [];
+  for (const value of getImageSourceValues(image)) {
+    const url = getCanonicalImageURL(value);
+    if (url && !urls.some((item) => item.href === url.href)) {
+      urls.push(url);
+    }
+  }
+  return urls;
+};
+
+const isExcalidrawAssetPath = (pathname: string): boolean =>
+  /^\/assets\/(?:.+\/)?excalidraw-.+\.(?:svg|png)$/i.test(pathname);
+
+const getExcalidrawImagePath = (
+  image: HTMLImageElement | null | undefined,
+): string => {
+  for (const value of getImageSourceValues(image)) {
+    const imagePath = normalizeAssetImagePath(value);
+    if (/^assets\/(?:.+\/)?excalidraw-.+\.(?:svg|png)$/i.test(imagePath)) {
+      return imagePath;
+    }
+  }
+  return "";
+};
+
+const imageUsesPath = (
+  image: HTMLImageElement | null | undefined,
+  pathname: string,
+): boolean => {
+  return getImageSourceValues(image).some((value) => {
     if (!value) return false;
     try {
       const url = resolveLocalURL(value);
@@ -77,30 +211,129 @@ const imageUsesPath = (image: HTMLImageElement, pathname: string): boolean => {
   });
 };
 
+const getCanonicalImageElementURL = (image: HTMLImageElement): URL | null => {
+  const urls = getCanonicalImageElementURLs(image);
+  return urls.find((url) => previewRefreshTokens.has(url.pathname))
+    ?? urls.find((url) => isExcalidrawAssetPath(url.pathname))
+    ?? urls[0]
+    ?? null;
+};
+
+const rememberPreviewRefreshToken = (pathname: string, token: string): void => {
+  previewRefreshTokens.delete(pathname);
+  previewRefreshTokens.set(pathname, token);
+  while (previewRefreshTokens.size > MAX_PREVIEW_REFRESH_TOKENS) {
+    const oldestPath = previewRefreshTokens.keys().next().value;
+    if (typeof oldestPath !== 'string') break;
+    previewRefreshTokens.delete(oldestPath);
+  }
+};
+
+const setImageRefreshSource = (
+  image: HTMLImageElement,
+  canonicalURL: URL,
+  refreshToken: string,
+): boolean => {
+  const getRefreshedURL = (value: string | null): URL | null => {
+    if (!value) return null;
+    try {
+      const candidateURL = resolveLocalURL(value);
+      if (
+        candidateURL.origin !== canonicalURL.origin ||
+        candidateURL.pathname !== canonicalURL.pathname
+      ) {
+        return null;
+      }
+      candidateURL.hash = '';
+      candidateURL.searchParams.set('_excalidraw_refresh', refreshToken);
+      return candidateURL;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const refreshedURL = getRefreshedURL(image.getAttribute('src'))
+    || (() => {
+      const fallbackURL = new URL(canonicalURL.href);
+      fallbackURL.searchParams.set('_excalidraw_refresh', refreshToken);
+      return fallbackURL;
+    })();
+  let didChange = false;
+  const updateAttribute = (attribute: string, value: string): void => {
+    if (image.getAttribute(attribute) === value) return;
+    image.setAttribute(attribute, value);
+    didChange = true;
+  };
+
+  updateAttribute('src', refreshedURL.href);
+
+  // SiYuan keeps the original URL in lazy-loading attributes. Updating only
+  // `src` lets a later lazy-load pass restore the stale preview.
+  for (const attribute of IMAGE_SOURCE_ATTRIBUTES) {
+    if (attribute === 'src') continue;
+    const value = image.getAttribute(attribute);
+    const nextURL = getRefreshedURL(value);
+    if (nextURL) updateAttribute(attribute, nextURL.href);
+  }
+
+  for (const attribute of IMAGE_SRCSET_ATTRIBUTES) {
+    const sourceSet = image.getAttribute(attribute);
+    if (!sourceSet) continue;
+    const refreshedSourceSet = sourceSet
+      .split(',')
+      .map((candidate) => {
+        const parts = candidate.trim().split(/\s+/);
+        const candidateURL = getRefreshedURL(parts.shift() || null);
+        if (!candidateURL) return candidate.trim();
+        return [candidateURL.href, ...parts].join(' ');
+      })
+      .filter(Boolean)
+      .join(', ');
+    updateAttribute(attribute, refreshedSourceSet);
+  }
+
+  return didChange;
+};
+
+const applyPendingPreviewRefresh = (image: HTMLImageElement): boolean => {
+  if (previewRefreshTokens.size === 0) return false;
+  const canonicalURL = getCanonicalImageElementURL(image);
+  if (!canonicalURL) return false;
+  const refreshToken = previewRefreshTokens.get(canonicalURL.pathname);
+  return refreshToken
+    ? setImageRefreshSource(image, canonicalURL, refreshToken)
+    : false;
+};
+
 const refreshExcalidrawPreview = (message: any): void => {
   const canonicalURL = getCanonicalImageURL(message?.imageURL);
   if (!canonicalURL) return;
 
   const pathname = canonicalURL.pathname;
+  const lifecycle = previewRefreshLifecycle;
   const previousRefresh = previewRefreshQueues.get(pathname) || Promise.resolve();
   const currentRefresh = previousRefresh
     .catch(() => undefined)
     .then(async () => {
+      if (lifecycle !== previewRefreshLifecycle) return;
       const refreshToken = `${Date.now()}-${++previewRefreshSequence}`;
       const refreshedURL = new URL(canonicalURL.href);
       refreshedURL.searchParams.set('_excalidraw_refresh', refreshToken);
-      const response = await fetch(refreshedURL.href, { cache: 'reload' });
+      const { response, blob: refreshedBlob } = await fetchBlobWithTimeout(
+        refreshedURL.href,
+        { cache: 'reload' },
+      );
       if (!response.ok) throw new Error(`preview refresh HTTP ${response.status}`);
-      const refreshedBlob = await response.blob();
       if (refreshedBlob.size === 0) throw new Error('preview refresh returned an empty image');
+      if (lifecycle !== previewRefreshLifecycle) return;
 
-      const srcset = `${refreshedURL.href} 1x, ${refreshedURL.href} 2x`;
+      rememberPreviewRefreshToken(pathname, refreshToken);
       const images = Array.from(document.images).filter((image) => imageUsesPath(image, pathname));
 
       await Promise.all(images.map(async (image) => {
-        image.setAttribute('srcset', srcset);
+        setImageRefreshSource(image, canonicalURL, refreshToken);
         try {
-          await image.decode();
+          await image.decode?.();
         } catch (error) {
           // Images that are still loading complete through their normal load event.
         }
@@ -135,40 +368,66 @@ export default class ExcalidrawPlugin extends Plugin {
   private _mutationObserver;
   private _openMenuImageHandler;
   private _globalKeyDownHandler;
+  private _imageLoadHandler;
+  private _snippetInjectionInFlight = new WeakSet<HTMLIFrameElement>();
 
   private settingItems: SettingItem[];
   public EDIT_TAB_TYPE = "excalidraw-plus-edit-tab";
 
   async onload() {
     this.initMetaInfo();
-    this.initSetting();
+    await this.initSetting();
 
     this._mutationObserver = this.setAddImageBlockMuatationObserver(document.body, (blockElement: HTMLElement) => {
-      const imageElement = blockElement.querySelector("img") as HTMLImageElement;
+      const imageElement = Array.from(blockElement.querySelectorAll<HTMLImageElement>("img"))
+        .find((image) => Boolean(getExcalidrawImagePath(image)));
       if (imageElement) {
-        const imageURL = imageElement.getAttribute("data-src");
-        const imageURLRegex = /^assets\/(?:.+\/)?excalidraw-.+\.(?:svg|png)$/;
-        if (!imageURLRegex.test(imageURL)) return;
-        this.getExcalidrawImageInfo(imageURL, false).then((imageInfo) => {
-          if (imageInfo) {
-            if (this.data[STORAGE_NAME].labelDisplay !== "noLabel") this.updateAttrLabel(imageInfo, blockElement);
+        const imageURL = getExcalidrawImagePath(imageElement);
+        if (!imageURL) return;
+        const refreshed = applyPendingPreviewRefresh(imageElement);
+        this.getExcalidrawImageInfo(imageURL, refreshed).then((imageInfo) => {
+          const currentImageElement = Array.from(
+            blockElement.querySelectorAll<HTMLImageElement>("img"),
+          ).find((image) => getExcalidrawImagePath(image) === imageURL) ?? null;
+          if (
+            imageInfo &&
+            blockElement.isConnected &&
+            getExcalidrawImagePath(currentImageElement) === imageURL
+          ) {
+            this.updateAttrLabel(imageInfo, blockElement);
 
             const actionElement = blockElement.querySelector(".protyle-action") as HTMLElement;
             if (actionElement) {
-              const editBtnElement = HTMLToElement(`<span aria-label="${this.i18n.editExcalidraw}" data-position="4north" class="ariaLabel protyle-icon"><svg><use xlink:href="#iconEdit"></use></svg></span>`);
-              editBtnElement.addEventListener("click", (event: PointerEvent) => {
-                event.preventDefault();
-                event.stopPropagation();
-                this.getExcalidrawImageInfo(imageElement.getAttribute("data-src"), false).then((imageInfo) => {
-                  if (!imageInfo) return;
-                  if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
-                    this.openEditTab(imageInfo);
-                  } else {
-                    this.openEditDialog(imageInfo);
-                  }
+              const existingEditButton = actionElement.querySelector(
+                '[data-excalidraw-plus-edit], .excalidraw-plus-edit-button',
+              );
+              if (!existingEditButton) {
+                const editBtnElement = HTMLToElement(`<span aria-label="${this.i18n.editExcalidraw}" data-excalidraw-plus-edit="true" data-position="4north" class="ariaLabel protyle-icon excalidraw-plus-edit-button"><svg><use xlink:href="#iconEdit"></use></svg></span>`);
+                editBtnElement.addEventListener("click", (event: PointerEvent) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  // Resolve the image at click time so a refreshed block never
+                  // opens the URL captured during the first mutation.
+                  const currentImageElement = Array.from(
+                    blockElement.querySelectorAll<HTMLImageElement>("img"),
+                  ).find((image) => Boolean(getExcalidrawImagePath(image))) ?? null;
+                  const imageURL = getExcalidrawImagePath(
+                    currentImageElement || blockElement.querySelector("img"),
+                  );
+                  if (!imageURL) return;
+                  this.getExcalidrawImageInfo(imageURL, false).then((imageInfo) => {
+                    if (!imageInfo) return;
+                    if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
+                      this.openEditTab(imageInfo);
+                    } else {
+                      this.openEditDialog(imageInfo);
+                    }
+                  }).catch((error) => {
+                    console.warn(`${this.name}: failed to open Excalidraw image`, error);
+                  });
                 });
-              });
-              actionElement.insertAdjacentElement('afterbegin', editBtnElement);
+                actionElement.insertAdjacentElement('afterbegin', editBtnElement);
+              }
               for (const child of actionElement.children) {
                 child.classList.toggle('protyle-icon--only', false);
                 child.classList.toggle('protyle-icon--first', false);
@@ -183,9 +442,17 @@ export default class ExcalidrawPlugin extends Plugin {
               }
             }
           }
+        }).catch((error) => {
+          console.warn(`${this.name}: failed to inspect image block`, error);
         });
       }
     });
+    this._imageLoadHandler = (event: Event) => {
+      if (event.target instanceof HTMLImageElement) {
+        applyPendingPreviewRefresh(event.target);
+      }
+    };
+    document.addEventListener('load', this._imageLoadHandler, true);
 
     this.setupEditTab();
 
@@ -193,7 +460,7 @@ export default class ExcalidrawPlugin extends Plugin {
       filter: ["excalidraw-plus", "excalidraw plus"],
       id: "excalidraw-plus",
       html: `<div class="b3-list-item__first"><svg class="b3-list-item__graphic"><use xlink:href="#iconImage"></use></svg><span class="b3-list-item__text">Excalidraw PLUS</span></div>`,
-      callback: (protyle, nodeElement) => {
+      callback: (protyle) => {
         this.newExcalidrawImage(protyle, (imageInfo) => {
           if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
             this.openEditTab(imageInfo);
@@ -229,15 +496,21 @@ export default class ExcalidrawPlugin extends Plugin {
   }
 
   onunload() {
+    previewRefreshLifecycle += 1;
     if (this._mutationObserver) this._mutationObserver.disconnect();
     if (this._openMenuImageHandler) this.eventBus.off("open-menu-image", this._openMenuImageHandler);
     if (this._globalKeyDownHandler) document.documentElement.removeEventListener("keydown", this._globalKeyDownHandler);
+    if (this._imageLoadHandler) document.removeEventListener('load', this._imageLoadHandler, true);
+    previewRefreshTokens.clear();
+    previewRefreshQueues.clear();
     this.reloadAllEditor();
   }
 
   uninstall() {
     this.removeData(STORAGE_NAME);
     this.removeData("library.excalidrawlib");
+    localStorage.removeItem(TEXT_STYLE_STORAGE_KEY);
+    localStorage.removeItem(LOCAL_FONT_STORAGE_KEY);
     this.removeTempDir();
   }
 
@@ -261,83 +534,151 @@ export default class ExcalidrawPlugin extends Plugin {
 
     // 配置的处理拷贝自思源源码
     const contentElement = dialog.element.querySelector(".b3-dialog__content");
-    this.settingItems.forEach(async (item) => {
-      let html = "";
-      let actionElement = item.actionElement;
-      if (!item.actionElement && item.createActionElement) {
-        actionElement = await item.createActionElement();
-      }
-      const tagName = actionElement?.classList.contains("b3-switch") ? "label" : "div";
-      if (typeof item.direction === "undefined") {
-        item.direction = (!actionElement || "TEXTAREA" === actionElement.tagName) ? "row" : "column";
-      }
-      if (item.direction === "row") {
-        html = `<${tagName} class="b3-label">
+    const confirmElement = dialog.element.querySelector(
+      ".b3-dialog__action [data-type='confirm']",
+    ) as HTMLButtonElement;
+    const cancelElement = dialog.element.querySelector(
+      ".b3-dialog__action [data-type='cancel']",
+    ) as HTMLElement;
+    if (!contentElement || !confirmElement || !cancelElement) return;
+
+    confirmElement.disabled = true;
+    cancelElement.addEventListener("click", () => {
+      dialog.destroy();
+    });
+
+    const populateSettings = async () => {
+      for (const item of this.settingItems) {
+        if (!dialog.element.isConnected) return;
+        let html = "";
+        let actionElement = item.actionElement;
+        if (!item.actionElement && item.createActionElement) {
+          actionElement = await item.createActionElement();
+        }
+        if (!dialog.element.isConnected) return;
+        const tagName = actionElement?.classList.contains("b3-switch") ? "label" : "div";
+        const direction = item.direction
+          ?? ((!actionElement || "TEXTAREA" === actionElement.tagName) ? "row" : "column");
+        if (direction === "row") {
+          html = `<${tagName} class="b3-label">
     <div class="fn__block">
         ${item.title}
         ${item.description ? `<div class="b3-label__text">${item.description}</div>` : ""}
         <div class="fn__hr"></div>
     </div>
 </${tagName}>`;
-      } else {
-        html = `<${tagName} class="fn__flex b3-label config__item">
+        } else {
+          html = `<${tagName} class="fn__flex b3-label config__item">
     <div class="fn__flex-1">
         ${item.title}
         ${item.description ? `<div class="b3-label__text">${item.description}</div>` : ""}
     </div>
     <span class="fn__space${actionElement ? "" : " fn__none"}"></span>
 </${tagName}>`;
-      }
-      contentElement.insertAdjacentHTML("beforeend", html);
-      if (actionElement) {
-        if (["INPUT", "TEXTAREA"].includes(actionElement.tagName)) {
-          dialog.bindInput(actionElement as HTMLInputElement, () => {
-            (dialog.element.querySelector(".b3-dialog__action [data-type='confirm']") as HTMLElement).dispatchEvent(new CustomEvent("click"));
-          });
         }
-        if (item.direction === "row") {
-          contentElement.lastElementChild.lastElementChild.insertAdjacentElement("beforeend", actionElement);
-          actionElement.classList.add("fn__block");
-        } else {
-          actionElement.classList.remove("fn__block");
-          actionElement.classList.add("fn__flex-center", "fn__size200");
-          contentElement.lastElementChild.insertAdjacentElement("beforeend", actionElement);
+        contentElement.insertAdjacentHTML("beforeend", html);
+        const itemElement = contentElement.lastElementChild;
+        if (actionElement && itemElement) {
+          if (["INPUT", "TEXTAREA"].includes(actionElement.tagName)) {
+            dialog.bindInput(actionElement as HTMLInputElement, () => {
+              confirmElement.dispatchEvent(new CustomEvent("click"));
+            });
+          }
+          if (direction === "row") {
+            itemElement.lastElementChild?.insertAdjacentElement("beforeend", actionElement);
+            actionElement.classList.add("fn__block");
+          } else {
+            actionElement.classList.remove("fn__block");
+            actionElement.classList.add("fn__flex-center", "fn__size200");
+            itemElement.insertAdjacentElement("beforeend", actionElement);
+          }
         }
       }
-    });
+    };
 
-    (dialog.element.querySelector(".b3-dialog__action [data-type='cancel']") as HTMLElement).addEventListener("click", () => {
-      dialog.destroy();
-    });
-    (dialog.element.querySelector(".b3-dialog__action [data-type='confirm']") as HTMLElement).addEventListener("click", () => {
+    const previousSettings = {
+      ...this.data[STORAGE_NAME],
+      snippets: [...this.data[STORAGE_NAME].snippets],
+    };
+    confirmElement.addEventListener("click", async () => {
+      if (confirmElement.disabled) return;
+      confirmElement.disabled = true;
       this.data[STORAGE_NAME].labelDisplay = (dialog.element.querySelector("[data-type='labelDisplay']") as HTMLSelectElement).value;
       this.data[STORAGE_NAME].embedImageFormat = (dialog.element.querySelector("[data-type='embedImageFormat']") as HTMLSelectElement).value;
       this.data[STORAGE_NAME].fullscreenEdit = (dialog.element.querySelector("[data-type='fullscreenEdit']") as HTMLInputElement).checked;
       this.data[STORAGE_NAME].editWindow = (dialog.element.querySelector("[data-type='editWindow']") as HTMLSelectElement).value;
       this.data[STORAGE_NAME].themeMode = (dialog.element.querySelector("[data-type='themeMode']") as HTMLSelectElement).value;
-      this.data[STORAGE_NAME].snippets = Array.from(dialog.element.querySelectorAll("[data-type='snippets'] input[data-id]:checked")).map(element => element.getAttribute("data-id"));
+      this.data[STORAGE_NAME].snippets = Array.from(
+        dialog.element.querySelectorAll("[data-type='snippets'] input[data-id]:checked"),
+      )
+        .map(element => element.getAttribute("data-id"))
+        .filter((id): id is string => Boolean(id));
       this.data[STORAGE_NAME].enableAutoSave = (dialog.element.querySelector("[data-type='enableAutoSave']") as HTMLInputElement).checked;
-      this.data[STORAGE_NAME].autoSaveInterval = (dialog.element.querySelector("[data-type='autoSaveInterval']") as HTMLInputElement).value;
-      this.data[STORAGE_NAME].fullSaveDelay = (dialog.element.querySelector("[data-type='fullSaveDelay']") as HTMLInputElement).value;
-      this.saveData(STORAGE_NAME, this.data[STORAGE_NAME]);
-      this.reloadAllEditor();
-      this.removeAllExcalidrawTab();
-      dialog.destroy();
+      this.data[STORAGE_NAME].rememberTextStyle = (dialog.element.querySelector("[data-type='rememberTextStyle']") as HTMLInputElement).checked;
+      this.data[STORAGE_NAME].autoSaveInterval = parseNonNegativeNumber(
+        (dialog.element.querySelector("[data-type='autoSaveInterval']") as HTMLInputElement).value,
+        previousSettings.autoSaveInterval,
+      );
+      this.data[STORAGE_NAME].fullSaveDelay = parseNonNegativeNumber(
+        (dialog.element.querySelector("[data-type='fullSaveDelay']") as HTMLInputElement).value,
+        previousSettings.fullSaveDelay,
+      );
+      try {
+        await this.saveData(STORAGE_NAME, this.data[STORAGE_NAME]);
+        if (!this.data[STORAGE_NAME].rememberTextStyle) localStorage.removeItem(TEXT_STYLE_STORAGE_KEY);
+        this.reloadAllEditor();
+        this.removeAllExcalidrawTab();
+        dialog.destroy();
+      } catch (error) {
+        this.data[STORAGE_NAME] = previousSettings;
+        confirmElement.disabled = false;
+        console.warn(`${this.name}: failed to save settings`, error);
+      }
     });
+
+    let settingsReady = false;
+    void populateSettings()
+      .then(() => {
+        settingsReady = true;
+      })
+      .catch((error) => {
+        console.warn(`${this.name}: failed to build settings`, error);
+      })
+      .finally(() => {
+        if (dialog.element.isConnected) confirmElement.disabled = !settingsReady;
+      });
   }
 
   private async initSetting() {
-    await this.loadData(STORAGE_NAME);
-    if (!this.data[STORAGE_NAME]) this.data[STORAGE_NAME] = {};
-    if (typeof this.data[STORAGE_NAME].labelDisplay === 'undefined') this.data[STORAGE_NAME].labelDisplay = "showLabelOnHover";
-    if (typeof this.data[STORAGE_NAME].embedImageFormat === 'undefined') this.data[STORAGE_NAME].embedImageFormat = "svg";
-    if (typeof this.data[STORAGE_NAME].fullscreenEdit === 'undefined') this.data[STORAGE_NAME].fullscreenEdit = false;
-    if (typeof this.data[STORAGE_NAME].editWindow === 'undefined') this.data[STORAGE_NAME].editWindow = 'dialog';
-    if (typeof this.data[STORAGE_NAME].themeMode === 'undefined') this.data[STORAGE_NAME].themeMode = "themeLight";
-    if (typeof this.data[STORAGE_NAME].snippets === 'undefined') this.data[STORAGE_NAME].snippets = [];
-    if (typeof this.data[STORAGE_NAME].enableAutoSave === 'undefined') this.data[STORAGE_NAME].enableAutoSave = true;
-    if (typeof this.data[STORAGE_NAME].autoSaveInterval === 'undefined') this.data[STORAGE_NAME].autoSaveInterval = 0;
-    if (typeof this.data[STORAGE_NAME].fullSaveDelay === 'undefined') this.data[STORAGE_NAME].fullSaveDelay = 5;
+    try {
+      await this.loadData(STORAGE_NAME);
+    } catch (error) {
+      console.warn(`${this.name}: failed to load settings; using defaults`, error);
+    }
+    if (!this.data || typeof this.data !== "object") this.data = {};
+    const storedSettings = this.data[STORAGE_NAME];
+    if (!storedSettings || typeof storedSettings !== "object" || Array.isArray(storedSettings)) {
+      this.data[STORAGE_NAME] = {};
+    }
+    const settings = this.data[STORAGE_NAME] as Record<string, any>;
+    settings.labelDisplay = ["noLabel", "showLabelAlways", "showLabelOnHover"].includes(settings.labelDisplay)
+      ? settings.labelDisplay
+      : "showLabelOnHover";
+    settings.embedImageFormat = ["svg", "png"].includes(settings.embedImageFormat)
+      ? settings.embedImageFormat
+      : "svg";
+    settings.fullscreenEdit = typeof settings.fullscreenEdit === "boolean" ? settings.fullscreenEdit : false;
+    settings.editWindow = ["dialog", "tab"].includes(settings.editWindow) ? settings.editWindow : "dialog";
+    settings.themeMode = ["themeLight", "themeDark", "themeOS"].includes(settings.themeMode)
+      ? settings.themeMode
+      : "themeLight";
+    settings.snippets = Array.isArray(settings.snippets)
+      ? settings.snippets.filter((snippet: unknown): snippet is string => typeof snippet === "string")
+      : [];
+    settings.enableAutoSave = typeof settings.enableAutoSave === "boolean" ? settings.enableAutoSave : true;
+    settings.rememberTextStyle = typeof settings.rememberTextStyle === "boolean" ? settings.rememberTextStyle : false;
+    settings.autoSaveInterval = parseNonNegativeNumber(settings.autoSaveInterval, 0);
+    settings.fullSaveDelay = parseNonNegativeNumber(settings.fullSaveDelay, 5);
 
     this.settingItems = [
       {
@@ -413,6 +754,16 @@ export default class ExcalidrawPlugin extends Plugin {
         },
       },
       {
+        title: this.i18n.rememberTextStyle,
+        direction: "column",
+        description: this.i18n.rememberTextStyleDescription,
+        createActionElement: async () => {
+          const element = HTMLToElement(`<input type="checkbox" class="b3-switch fn__flex-center" data-type="rememberTextStyle">`) as HTMLInputElement;
+          element.checked = this.data[STORAGE_NAME].rememberTextStyle;
+          return element;
+        },
+      },
+      {
         title: this.i18n.autoSaveInterval,
         direction: "column",
         description: this.i18n.autoSaveIntervalDescription,
@@ -434,23 +785,26 @@ export default class ExcalidrawPlugin extends Plugin {
         description: this.i18n.snippetsDescription,
         createActionElement: async () => {
           const snippets = await this.getSnippets();
+          if (!snippets) {
+            throw new Error("Unable to load SiYuan snippets");
+          }
           const optionsHTML = snippets.map(snippet => {
+            const snippetId = typeof snippet.id === "string" ? snippet.id : "";
+            const snippetName = typeof snippet.name === "string" ? snippet.name : "";
             return `
 <div class="fn__hr--small"></div>
 <div class="fn__flex">
-  <div class="b3-chip b3-chip--small ${snippet.type === 'css' ? "b3-chip--primary" : "b3-chip--secondary"}">${snippet.type.toUpperCase()}</div>
+  <div class="b3-chip b3-chip--small ${snippet.type === 'css' ? "b3-chip--primary" : "b3-chip--secondary"}">${escapeHTML(String(snippet.type || "").toUpperCase())}</div>
   <div class="fn__space"></div>
-  <div class="fn__flex-1">${snippet.name}</div>
+  <div class="fn__flex-1">${escapeHTML(snippetName)}</div>
   <div class="fn__space"></div>
-  <input type="checkbox" class="b3-switch fn__flex-center" data-id="${snippet.id}" />
+  <input type="checkbox" class="b3-switch fn__flex-center" data-id="${escapeHTML(snippetId)}" />
 </div>`;
           }).join("");
           const element = HTMLToElement(`<div class="fn__flex-center" data-type="snippets">${optionsHTML}</div>`);
-          this.data[STORAGE_NAME].snippets.forEach(snippet => {
-            const checkbox = element.querySelector(`[data-id="${snippet}"]`) as HTMLInputElement;
-            if (checkbox) {
-              checkbox.checked = true;
-            }
+          const selectedSnippets = new Set(this.data[STORAGE_NAME].snippets);
+          element.querySelectorAll<HTMLInputElement>("input[data-id]").forEach((checkbox) => {
+            checkbox.checked = selectedSnippets.has(checkbox.getAttribute("data-id") || "");
           });
           return element;
         },
@@ -495,33 +849,90 @@ export default class ExcalidrawPlugin extends Plugin {
               }
             }
           });
+        } else if (
+          mutation.type === 'attributes' &&
+          mutation.target instanceof HTMLImageElement
+        ) {
+          const imageElement = mutation.target;
+          applyPendingPreviewRefresh(imageElement);
+          const imageURL = getExcalidrawImagePath(imageElement);
+          if (!imageURL) continue;
+          const blockElement = imageElement.closest(
+            "div[data-type='NodeParagraph']",
+          ) as HTMLElement | null;
+          if (!blockElement) continue;
+          const hasEditButton = Boolean(blockElement.querySelector(
+            '[data-excalidraw-plus-edit], .excalidraw-plus-edit-button',
+          ));
+          const hasLabel = Boolean(blockElement.querySelector('.label--embed-excalidraw'));
+          const dataSrc = imageElement.getAttribute('data-src');
+          let isPreviewRefreshMutation = false;
+          if (mutation.attributeName === 'data-src' && dataSrc) {
+            try {
+              const dataSrcURL = resolveLocalURL(dataSrc);
+              const refreshToken = previewRefreshTokens.get(dataSrcURL.pathname);
+              isPreviewRefreshMutation = Boolean(
+                refreshToken &&
+                dataSrcURL.searchParams.get('_excalidraw_refresh') === refreshToken,
+              );
+            } catch (error) {
+              isPreviewRefreshMutation = false;
+            }
+          }
+          if (
+            (mutation.attributeName === 'data-src' && !isPreviewRefreshMutation) ||
+            !hasEditButton ||
+            (this.data[STORAGE_NAME].labelDisplay !== 'noLabel' && !hasLabel)
+          ) {
+            callback(blockElement);
+          }
         }
       }
     });
 
     mutationObserver.observe(element, {
       childList: true,
-      subtree: true
+      subtree: true,
+      attributes: true,
+      attributeFilter: [
+        ...IMAGE_SOURCE_ATTRIBUTES,
+        ...IMAGE_SRCSET_ATTRIBUTES,
+      ],
     });
 
     return mutationObserver;
   }
 
   public async getExcalidrawImageInfo(imageURL: string, reload: boolean): Promise<ExcalidrawImageInfo | null> {
-    const imageURLRegex = /^assets\/.+\.(?:svg|png)$/;
+    imageURL = normalizeAssetImagePath(imageURL);
+    const imageURLRegex = /^assets\/.+\.(?:svg|png)$/i;
     if (!imageURLRegex.test(imageURL)) return null;
 
-    const imageContent = await this.getExcalidrawImage(imageURL, reload);
-    if (!imageContent) return null;
+    try {
+      const imageContent = await this.getExcalidrawImage(imageURL, reload);
+      if (!imageContent) return null;
 
-    if (!base64ToUnicode(imageContent.split(',').pop()).includes("application/vnd.excalidraw+json")) return null;
+      const encodedContent = imageContent.split(',').pop();
+      if (!encodedContent) return null;
+      const isPNG = imageURL.toLowerCase().endsWith(".png");
+      const hasMetadata = isPNG
+        ? Boolean(locatePNGtEXt(
+          base64ToArray(encodedContent),
+          "application/vnd.excalidraw+json",
+        ))
+        : base64ToUnicode(encodedContent).includes("application/vnd.excalidraw+json");
+      if (!hasMetadata) return null;
 
-    const imageInfo: ExcalidrawImageInfo = {
-      imageURL: imageURL,
-      data: imageContent,
-      format: imageURL.endsWith(".svg") ? "svg" : "png",
+      const imageInfo: ExcalidrawImageInfo = {
+        imageURL: imageURL,
+        data: imageContent,
+        format: isPNG ? "png" : "svg",
+      }
+      return imageInfo;
+    } catch (error) {
+      console.warn(`${this.name}: failed to parse Excalidraw image`, error);
+      return null;
     }
-    return imageInfo;
   }
 
   public getPlaceholderImageContent(format: 'svg' | 'png'): string {
@@ -529,7 +940,7 @@ export default class ExcalidrawPlugin extends Plugin {
     return imageContent;
   }
 
-  public newExcalidrawImage(protyle: Protyle, callback?: (imageInfo: ExcalidrawImageInfo) => void) {
+  public async newExcalidrawImage(protyle: Protyle, callback?: (imageInfo: ExcalidrawImageInfo) => void) {
     const format = this.data[STORAGE_NAME].embedImageFormat;
     const imageName = `excalidraw-image-${window.Lute.NewNodeID()}.${format}`;
     const placeholderImageContent = this.getPlaceholderImageContent(format);
@@ -539,7 +950,8 @@ export default class ExcalidrawPlugin extends Plugin {
     formData.append('path', `data/assets/${imageName}`);
     formData.append('file', file);
     formData.append('isDir', 'false');
-    fetchPost('/api/file/putFile', formData, () => {
+    try {
+      await putFile(formData);
       const imageURL = `assets/${imageName}`;
       protyle.insert(`![](${imageURL})`);
       const imageInfo: ExcalidrawImageInfo = {
@@ -550,60 +962,102 @@ export default class ExcalidrawPlugin extends Plugin {
       if (callback) {
         callback(imageInfo);
       }
-    });
+    } catch (error) {
+      console.warn(`${this.name}: failed to create Excalidraw image`, error);
+    }
   }
 
   public async getExcalidrawImage(imageURL: string, reload: boolean): Promise<string> {
-    const response = await fetch(imageURL, { cache: reload ? 'reload' : 'default' });
-    if (!response.ok) return "";
-    const blob = await response.blob();
-    return await blobToDataURL(blob);
+    try {
+      const requestURL = imageURL.startsWith("/") ? imageURL : `/${imageURL}`;
+      const { response, blob } = await fetchBlobWithTimeout(requestURL, {
+        cache: reload ? 'reload' : 'default',
+      });
+      if (!response.ok) return "";
+      return await blobToDataURL(blob);
+    } catch (error) {
+      console.warn(`${this.name}: image request failed`, error);
+      return "";
+    }
   }
 
   public updateAttrLabel(imageInfo: ExcalidrawImageInfo, blockElement: HTMLElement) {
     if (!imageInfo) return;
 
-    if (this.data[STORAGE_NAME].labelDisplay === "noLabel") return;
-
     const attrElement = blockElement.querySelector(".protyle-attr") as HTMLDivElement;
-    if (attrElement) {
-      const labelHTML = `<span>Excalidraw</span>`;
-      let labelElement = attrElement.querySelector(".label--embed-excalidraw") as HTMLDivElement;
-      if (labelElement) {
-        labelElement.innerHTML = labelHTML;
-      } else {
-        labelElement = document.createElement("div");
-        labelElement.classList.add("label--embed-excalidraw");
-        if (this.data[STORAGE_NAME].labelDisplay === "showLabelAlways") {
-          labelElement.classList.add("label--embed-excalidraw--always");
-        }
-        labelElement.innerHTML = labelHTML;
-        attrElement.prepend(labelElement);
-      }
+    if (!attrElement) return;
+
+    const labelElement = attrElement.querySelector(
+      ".label--embed-excalidraw",
+    ) as HTMLDivElement | null;
+    if (this.data[STORAGE_NAME].labelDisplay === "noLabel") {
+      labelElement?.remove();
+      return;
     }
+
+    const nextLabelElement = labelElement || document.createElement("div");
+    nextLabelElement.classList.add("label--embed-excalidraw");
+    nextLabelElement.classList.toggle(
+      "label--embed-excalidraw--always",
+      this.data[STORAGE_NAME].labelDisplay === "showLabelAlways",
+    );
+    nextLabelElement.innerHTML = "<span>Excalidraw</span>";
+    if (!labelElement) attrElement.prepend(nextLabelElement);
   }
 
-  private openMenuImageHandler({ detail }) {
-    const selectedElement = detail.element;
-    const imageElement = selectedElement.querySelector("img") as HTMLImageElement;
-    const imageURL = imageElement.dataset.src;
+  private openMenuImageHandler(event: any) {
+    const selectedElement = event?.detail?.element as HTMLElement | undefined;
+    const imageElement = selectedElement?.matches?.("img")
+      ? selectedElement as HTMLImageElement
+      : selectedElement?.querySelector("img") as HTMLImageElement | null;
+    const imageURL = imageElement ? getExcalidrawImagePath(imageElement) : "";
+    if (!imageURL) return;
+    const menu = window.siyuan.menus.menu;
+    const selectionRoot = imageElement?.closest("[data-node-id]") as HTMLElement | null
+      || selectedElement;
+    const getCurrentImage = (): HTMLImageElement | null => {
+      if (!selectionRoot?.isConnected) return null;
+      if (selectionRoot instanceof HTMLImageElement) return selectionRoot;
+      return Array.from(
+        selectionRoot.querySelectorAll<HTMLImageElement>(
+          ".img[data-type='img'] img, img",
+        ),
+      ).find((image) => Boolean(getExcalidrawImagePath(image))) ?? null;
+    };
     this.getExcalidrawImageInfo(imageURL, true).then((imageInfo: ExcalidrawImageInfo) => {
-      if (imageInfo) {
-        window.siyuan.menus.menu.addItem({
+      const currentImageElement = getCurrentImage();
+      if (
+        imageInfo &&
+        menu === window.siyuan.menus.menu &&
+        getExcalidrawImagePath(currentImageElement) === imageURL
+      ) {
+        menu.addItem({
           id: "edit-excalidraw",
           icon: 'iconEdit',
           label: `${this.i18n.editExcalidraw}`,
           index: 1,
           click: () => {
-            if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
-              this.openEditTab(imageInfo);
-            } else {
-              this.openEditDialog(imageInfo);
-            }
+            // Resolve the image again when the menu item is clicked. SiYuan
+            // can replace the image node while the asynchronous menu lookup
+            // is still in flight.
+            const currentImageURL = getExcalidrawImagePath(getCurrentImage());
+            if (!currentImageURL) return;
+            void this.getExcalidrawImageInfo(currentImageURL, true).then((currentImageInfo) => {
+              if (!currentImageInfo) return;
+              if (!this.isMobile && this.data[STORAGE_NAME].editWindow === 'tab') {
+                this.openEditTab(currentImageInfo);
+              } else {
+                this.openEditDialog(currentImageInfo);
+              }
+            }).catch((error) => {
+              console.warn(`${this.name}: failed to open image from menu`, error);
+            });
           }
         });
       }
-    })
+    }).catch((error) => {
+      console.warn(`${this.name}: failed to prepare image menu`, error);
+    });
   }
 
   private getActiveCustomTab(type: string): Custom {
@@ -660,7 +1114,7 @@ export default class ExcalidrawPlugin extends Plugin {
 
   private globalKeyDownHandler = (event: KeyboardEvent) => {
     // 如果是在代码编辑器里使用快捷键，则阻止冒泡 https://github.com/YuxinZhaozyx/siyuan-embed-tikz/issues/1
-    if (document.activeElement.closest(".b3-dialog--open .excalidraw-edit-dialog")) {
+    if (document.activeElement?.closest(".b3-dialog--open .excalidraw-edit-dialog")) {
       event.stopPropagation();
     }
 
@@ -677,7 +1131,7 @@ export default class ExcalidrawPlugin extends Plugin {
         const iframeID = encodeURIComponent(unicodeToBase64(`${PLUGIN_ID}-edit-tab-${imageInfo.imageURL}`));
         const editTabHTML = `
 <div class="excalidraw-edit-tab">
-    <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}${that.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${that.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${that.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${that.data[STORAGE_NAME].fullSaveDelay}"></iframe>
+    <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}${that.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${that.data[STORAGE_NAME].enableAutoSave}&rememberTextStyle=${that.data[STORAGE_NAME].rememberTextStyle}&autoSaveInterval=${that.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${that.data[STORAGE_NAME].fullSaveDelay}"></iframe>
 </div>`;
         this.element.innerHTML = editTabHTML;
 
@@ -694,20 +1148,35 @@ export default class ExcalidrawPlugin extends Plugin {
         let iframeReady = false;
         let closeMessageSent = false;
         let closeRequestTimer: ReturnType<typeof setTimeout> | null = null;
-        const closeRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        let activeCloseRequestId: string | null = null;
+        let iframeKeydownBound = false;
+        const clearCloseRequestTimer = () => {
+          if (closeRequestTimer) {
+            clearTimeout(closeRequestTimer);
+            closeRequestTimer = null;
+          }
+        };
+        const resetCloseRequest = () => {
+          closeRequested = false;
+          closeMessageSent = false;
+          activeCloseRequestId = null;
+          clearCloseRequestTimer();
+        };
         const requestTabClose = () => {
-          if (closeRequested) return;
+          if (activeCloseRequestId) return;
+          const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          activeCloseRequestId = requestId;
           closeRequested = true;
           if (iframeReady && !closeMessageSent) {
             closeMessageSent = true;
-            postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+            postMessage({ event: 'saveAndExit', requestId });
           }
           closeRequestTimer = setTimeout(() => {
-            closeRequested = false;
-            closeMessageSent = false;
-            closeRequestTimer = null;
-            console.warn('Excalidraw tab close was canceled because saving did not finish');
-          }, 30000);
+            if (activeCloseRequestId === requestId) {
+              resetCloseRequest();
+              console.warn('Excalidraw tab close was canceled because saving did not finish');
+            }
+          }, CLOSE_SAVE_TIMEOUT_MS);
         };
         (this.tab as any).close = requestTabClose;
         const tabCloseElement = this.tab.headElement?.querySelector('.item__close');
@@ -729,16 +1198,19 @@ export default class ExcalidrawPlugin extends Plugin {
         const keydownEventHandleer = (event: KeyboardEvent) => {
           that.tabHotKeyEventHandler(event, this);
         };
-        const onInit = (message: any) => {
-          iframe.contentWindow.addEventListener("keydown", keydownEventHandleer);
+        const onInit = () => {
+          if (!iframeKeydownBound && iframe.contentWindow) {
+            iframe.contentWindow.addEventListener("keydown", keydownEventHandleer);
+            iframeKeydownBound = true;
+          }
         }
 
-        const onReady = (message: any) => {
+        const onReady = () => {
           iframeReady = true;
           that.injectSnippetsToIframe(iframe);
           if (closeRequested && !closeMessageSent) {
             closeMessageSent = true;
-            postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+            postMessage({ event: 'saveAndExit', requestId: activeCloseRequestId });
           }
         }
 
@@ -746,22 +1218,27 @@ export default class ExcalidrawPlugin extends Plugin {
           refreshExcalidrawPreview(message);
         }
 
-        const onBrowseLibrary = (message: any) => {
+        const onBrowseLibrary = () => {
+          resetCloseRequest();
           closeTabNow();
         };
 
         const onExit = (message: any) => {
+          if (activeCloseRequestId) {
+            if (message.requestId !== activeCloseRequestId) return;
+          } else if (message.requestId) {
+            return;
+          }
+          resetCloseRequest();
           closeTabNow();
         };
 
         const onSaveFailed = (message: any) => {
-          if (message.requestId !== closeRequestId) return;
-          closeRequested = false;
-          closeMessageSent = false;
-          if (closeRequestTimer) {
-            clearTimeout(closeRequestTimer);
-            closeRequestTimer = null;
-          }
+          if (
+            !activeCloseRequestId ||
+            message.requestId !== activeCloseRequestId
+          ) return;
+          resetCloseRequest();
           console.warn('Excalidraw tab close was canceled because saving failed');
         };
 
@@ -784,16 +1261,16 @@ export default class ExcalidrawPlugin extends Plugin {
               if (message != null) {
                 // console.log(message.event);
                 if (message.event == "init") {
-                  onInit(message);
+                  onInit();
                 }
                 else if (message.event == "ready") {
-                  onReady(message);
+                  onReady();
                 }
                 else if (message.event == "save") {
                   onSave(message);
                 }
                 else if (message.event == "browseLibrary") {
-                  onBrowseLibrary(message);
+                  onBrowseLibrary();
                 }
                 else if (message.event == "exit") {
                   onExit(message);
@@ -817,8 +1294,12 @@ export default class ExcalidrawPlugin extends Plugin {
           window.removeEventListener("message", messageEventHandler);
           tabCloseElement?.removeEventListener('click', tabCloseClickHandler, true);
           this.tab.headElement?.removeEventListener('mousedown', tabMiddleClickHandler, true);
+          if (iframeKeydownBound && iframe.contentWindow) {
+            iframe.contentWindow.removeEventListener("keydown", keydownEventHandleer);
+            iframeKeydownBound = false;
+          }
           (this.tab as any).close = closeTabNow;
-          if (closeRequestTimer) clearTimeout(closeRequestTimer);
+          resetCloseRequest();
         };
       }
     });
@@ -843,7 +1324,7 @@ export default class ExcalidrawPlugin extends Plugin {
     <div class="edit-dialog-header resize__move"></div>
     <div class="edit-dialog-container">
         <div class="edit-dialog-editor">
-            <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}&fullscreenBtn=1${this.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${this.data[STORAGE_NAME].enableAutoSave}&autoSaveInterval=${this.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${this.data[STORAGE_NAME].fullSaveDelay}"></iframe>
+            <iframe src="/plugins/siyuan-embed-excalidraw-plus/app/?lang=${window.siyuan.config.lang.replace('_', '-')}&fullscreenBtn=1${this.isDarkMode() ? "&dark=1" : ""}&iframeID=${iframeID}&imageURL=${encodeURIComponent(imageInfo.imageURL)}&enableAutoSave=${this.data[STORAGE_NAME].enableAutoSave}&rememberTextStyle=${this.data[STORAGE_NAME].rememberTextStyle}&autoSaveInterval=${this.data[STORAGE_NAME].autoSaveInterval}&fullSaveDelay=${this.data[STORAGE_NAME].fullSaveDelay}"></iframe>
         </div>
         <div class="fn__hr--b"></div>
     </div>
@@ -875,31 +1356,45 @@ export default class ExcalidrawPlugin extends Plugin {
     let iframeReady = false;
     let closeMessageSent = false;
     let closeRequestTimer: ReturnType<typeof setTimeout> | null = null;
-    const closeRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let activeCloseRequestId: string | null = null;
+    const clearCloseRequestTimer = () => {
+      if (closeRequestTimer) {
+        clearTimeout(closeRequestTimer);
+        closeRequestTimer = null;
+      }
+    };
+    const resetCloseRequest = () => {
+      closeRequested = false;
+      closeMessageSent = false;
+      activeCloseRequestId = null;
+      clearCloseRequestTimer();
+    };
     const requestDialogClose = () => {
-      if (closeRequested) return;
+      if (activeCloseRequestId) return;
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      activeCloseRequestId = requestId;
       closeRequested = true;
       if (iframeReady && !closeMessageSent) {
         closeMessageSent = true;
-        postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+        postMessage({ event: 'saveAndExit', requestId });
       }
       closeRequestTimer = setTimeout(() => {
-        closeRequested = false;
-        closeMessageSent = false;
-        closeRequestTimer = null;
-        console.warn('Excalidraw close was canceled because saving did not finish');
-      }, 30000);
+        if (activeCloseRequestId === requestId) {
+          resetCloseRequest();
+          console.warn('Excalidraw close was canceled because saving did not finish');
+        }
+      }, CLOSE_SAVE_TIMEOUT_MS);
     };
     (dialog as any).destroy = requestDialogClose;
 
-    const onInit = (message: any) => {}
+    const onInit = () => {}
 
-    const onReady = (message: any) => {
+    const onReady = () => {
       iframeReady = true;
       this.injectSnippetsToIframe(iframe);
       if (closeRequested && !closeMessageSent) {
         closeMessageSent = true;
-        postMessage({ event: 'saveAndExit', requestId: closeRequestId });
+        postMessage({ event: 'saveAndExit', requestId: activeCloseRequestId });
       }
     }
 
@@ -907,22 +1402,27 @@ export default class ExcalidrawPlugin extends Plugin {
       refreshExcalidrawPreview(message);
     }
 
-    const onBrowseLibrary = (message: any) => {
+    const onBrowseLibrary = () => {
+      resetCloseRequest();
       destroyDialogNow();
     };
 
     const onExit = (message: any) => {
+      if (activeCloseRequestId) {
+        if (message.requestId !== activeCloseRequestId) return;
+      } else if (message.requestId) {
+        return;
+      }
+      resetCloseRequest();
       destroyDialogNow();
     };
 
     const onSaveFailed = (message: any) => {
-      if (message.requestId !== closeRequestId) return;
-      closeRequested = false;
-      closeMessageSent = false;
-      if (closeRequestTimer) {
-        clearTimeout(closeRequestTimer);
-        closeRequestTimer = null;
-      }
+      if (
+        !activeCloseRequestId ||
+        message.requestId !== activeCloseRequestId
+      ) return;
+      resetCloseRequest();
       console.warn('Excalidraw close was canceled because saving failed');
     };
 
@@ -985,16 +1485,16 @@ export default class ExcalidrawPlugin extends Plugin {
           if (message != null) {
             // console.log(message.event);
             if (message.event == "init") {
-              onInit(message);
+              onInit();
             }
             else if (message.event == "ready") {
-              onReady(message);
+              onReady();
             }
             else if (message.event == "save") {
               onSave(message);
             }
             else if (message.event == "browseLibrary") {
-              onBrowseLibrary(message);
+              onBrowseLibrary();
             }
             else if (message.event == "exit") {
               onExit(message);
@@ -1019,7 +1519,7 @@ export default class ExcalidrawPlugin extends Plugin {
     window.addEventListener("message", messageEventHandler);
     dialogDestroyCallbacks.push(() => {
       window.removeEventListener("message", messageEventHandler);
-      if (closeRequestTimer) clearTimeout(closeRequestTimer);
+      resetCloseRequest();
       (dialog as any).destroy = destroyDialogNow;
     });
   }
@@ -1040,33 +1540,61 @@ export default class ExcalidrawPlugin extends Plugin {
     return this.data[STORAGE_NAME].themeMode === 'themeDark' || (this.data[STORAGE_NAME].themeMode === 'themeOS' && window.siyuan.config.appearance.mode === 1);
   }
 
-  private async getSnippets(snippetIDs?: string[]): Promise<ISnippet[]> {
-    const response = await fetchSyncPost("/api/snippet/getSnippet", { type: "all", enabled: 2 });
-    if (response.code !== 0) {
-      console.warn(`${this.name}: get snippets failed`);
+  private async getSnippets(snippetIDs?: string[]): Promise<ISnippet[] | null> {
+    try {
+      const response = await fetchSyncPost("/api/snippet/getSnippet", { type: "all", enabled: 2 });
+      if (!response || response.code !== 0) {
+        console.warn(`${this.name}: get snippets failed`);
+        return null;
+      }
+      let snippets = ((response.data?.snippets || []) as ISnippet[]).filter(
+        (snippet) => snippet && typeof snippet.id === "string",
+      );
+      // 当指定snippetIDs时，只返回指定的snippets
+      if (typeof snippetIDs !== 'undefined') {
+        const selectedSnippetIDs = new Set(snippetIDs);
+        snippets = snippets.filter(snippet => selectedSnippetIDs.has(snippet.id));
+      }
+      return snippets;
+    } catch (error) {
+      console.warn(`${this.name}: get snippets failed`, error);
+      return null;
     }
-    let snippets = response.data.snippets as ISnippet[];
-    // 当指定snippetIDs时，只返回指定的snippets
-    if (typeof snippetIDs !== 'undefined') {
-      snippets = snippets.filter(snippet => this.data[STORAGE_NAME].snippets.includes(snippet.id));
-    }
-    return snippets;
   }
 
   private async injectSnippetsToIframe(iframe: HTMLIFrameElement) {
-    const snippets = await this.getSnippets(this.data[STORAGE_NAME].snippets);
-    snippets.forEach((snippet: ISnippet) => {
-      let snippetElement: HTMLElement;
-      if (snippet.type === 'css') {
-        snippetElement = document.createElement('style');
-        snippetElement.textContent = snippet.content;
-      } else {
-        snippetElement = document.createElement('script');
-        snippetElement.setAttribute('type', 'text/javascript');
-        snippetElement.textContent = snippet.content;
-      }
-      iframe.contentDocument?.head?.appendChild(snippetElement);
-    });
+    if (!iframe.isConnected || this._snippetInjectionInFlight.has(iframe)) return;
+    const head = iframe.contentDocument?.head;
+    const hasLoadedSnippets = (target: HTMLHeadElement): boolean => (
+      target.dataset.excalidrawPlusSnippetsLoaded === 'true' ||
+      Boolean(target.querySelector('[data-excalidraw-plus-snippet="true"]'))
+    );
+    if (!head || hasLoadedSnippets(head)) return;
+
+    this._snippetInjectionInFlight.add(iframe);
+    try {
+      const snippets = await this.getSnippets(this.data[STORAGE_NAME].snippets);
+      if (!snippets) return;
+      if (!iframe.isConnected) return;
+      const currentHead = iframe.contentDocument?.head;
+      if (!currentHead || hasLoadedSnippets(currentHead)) return;
+      snippets.forEach((snippet: ISnippet) => {
+        let snippetElement: HTMLElement;
+        if (snippet.type === 'css') {
+          snippetElement = document.createElement('style');
+          snippetElement.textContent = snippet.content;
+        } else {
+          snippetElement = document.createElement('script');
+          snippetElement.setAttribute('type', 'text/javascript');
+          snippetElement.textContent = snippet.content;
+        }
+        snippetElement.setAttribute('data-excalidraw-plus-snippet', 'true');
+        currentHead.appendChild(snippetElement);
+      });
+      currentHead.dataset.excalidrawPlusSnippetsLoaded = 'true';
+    } finally {
+      this._snippetInjectionInFlight.delete(iframe);
+    }
   }
 
   private removeTempDir() {

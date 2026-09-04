@@ -18,6 +18,8 @@
   "snippetsDescription": "让思源代码片段在Excalidraw中生效",
   "enableAutoSave": "启用自动保存",
   "enableAutoSaveDescription": "编辑时自动保存内容",
+  "rememberTextStyle": "记住新文本样式",
+  "rememberTextStyleDescription": "跨图片记住无选区时设置的字体和字号",
   "autoSaveInterval": "自动保存间隔",
   "autoSaveIntervalDescription": "自动保存的间隔时间，单位为秒 (设置为0则即时保存)",
   "fullSaveDelay": "完全保存延迟",

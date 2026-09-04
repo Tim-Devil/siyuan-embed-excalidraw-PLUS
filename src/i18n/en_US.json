@@ -18,6 +18,8 @@
   "snippetsDescription": "Make SiYuan snippets available at Excalidraw",
   "enableAutoSave": "Enable Auto Save",
   "enableAutoSaveDescription": "Automatically save content during editing",
+  "rememberTextStyle": "Remember New Text Style",
+  "rememberTextStyleDescription": "Remember the font and font size set without a selection across drawings",
   "autoSaveInterval": "Auto Save Interval",
   "autoSaveIntervalDescription": "Interval between auto saves, in seconds (0 to auto save at any change)",
   "fullSaveDelay": "Full Save Delay",

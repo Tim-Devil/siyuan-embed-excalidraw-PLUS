@@ -1,41 +1,56 @@
 import Vditor from 'vditor';
 import 'vditor/dist/index.css';
 import type { SiyuanBlockData } from './types';
-import { getElementData, getParentWindow, updateElementData } from './utils';
+import { getElementData, getParentWindow } from './utils';
 
 // 获取 URL 参数
 const urlParams = new URLSearchParams(window.location.search);
 const elementId = urlParams.get('elementId');
 const blockId = urlParams.get('blockId');
 let currentBlockData: SiyuanBlockData | null = null;
-let vditorPreviewElement: HTMLElement | null = null;
+let updateRequestSequence = 0;
+let renderSequence = 0;
+let removeButtonVisibilityListeners: (() => void) | null = null;
 
 /**
  * 渲染思源块 Markdown 内容为静态 HTML
  */
-async function renderBlock(blockData: SiyuanBlockData): Promise<void> {
+async function renderBlock(
+  blockData: SiyuanBlockData,
+  requestId = updateRequestSequence,
+): Promise<void> {
   const rootElement = document.getElementById('root');
   if (!rootElement) return;
 
-  // 清空现有内容
-  rootElement.innerHTML = '';
-
-  // 创建预览容器
+  const currentRenderId = ++renderSequence;
   const previewContainer = document.createElement('div');
-  previewContainer.id = 'preview';
   previewContainer.className = 'vditor-reset';
-  rootElement.appendChild(previewContainer);
 
   // 使用 Vditor.preview 渲染 Markdown
-  Vditor.preview(previewContainer, blockData.content, {
-    mode: 'light',
-    cdn: '/plugins/siyuan-embed-excalidraw-plus/embed/markdown/vditor',
-    speech: {
-      enable: false,
-    },
-  });
+  try {
+    await Vditor.preview(previewContainer, blockData.content, {
+      mode: 'light',
+      cdn: '/plugins/siyuan-embed-excalidraw-plus/embed/markdown/vditor',
+      speech: {
+        enable: false,
+      },
+    });
+  } catch (error) {
+    if (currentRenderId === renderSequence && requestId === updateRequestSequence) {
+      throw error;
+    }
+    return;
+  }
 
-  vditorPreviewElement = previewContainer;
+  // Only the latest completed render may replace the visible preview.
+  if (
+    currentRenderId !== renderSequence ||
+    requestId !== updateRequestSequence ||
+    !rootElement.isConnected
+  ) return;
+
+  previewContainer.id = 'preview';
+  rootElement.replaceChildren(previewContainer);
 }
 
 /**
@@ -45,15 +60,18 @@ function setupButtonVisibility(): void {
   const buttonContainer = document.getElementById('button-container');
   if (!buttonContainer) return;
 
+  const showButtons = () => buttonContainer.classList.add('button-visible');
+  const hideButtons = () => buttonContainer.classList.remove('button-visible');
+
   // 鼠标移入 iframe 时显示按钮
-  document.addEventListener('mouseenter', () => {
-    buttonContainer.classList.toggle('button-visible', true);
-  });
+  document.addEventListener('mouseenter', showButtons);
 
   // 鼠标移出 iframe 时隐藏按钮
-  document.addEventListener('mouseleave', () => {
-    buttonContainer.classList.toggle('button-visible', false);
-  });
+  document.addEventListener('mouseleave', hideButtons);
+  removeButtonVisibilityListeners = () => {
+    document.removeEventListener('mouseenter', showButtons);
+    document.removeEventListener('mouseleave', hideButtons);
+  };
 }
 
 /**
@@ -61,34 +79,52 @@ function setupButtonVisibility(): void {
  */
 const handleUpdate = async (): Promise<void> => {
   if (!elementId || !blockId) return;
+  const requestId = ++updateRequestSequence;
 
-  const newBlockData = await getElementData(elementId, blockId);
-  if (newBlockData === null) {
-    console.error('Failed to fetch siyuan block');
-    showErrorMessage();
-    return;
+  try {
+    const newBlockData = await getElementData(
+      elementId,
+      blockId,
+      () => requestId === updateRequestSequence,
+    );
+    if (requestId !== updateRequestSequence) return;
+    if (newBlockData === null) {
+      console.error('Failed to fetch siyuan block');
+      return;
+    }
+
+    const currentConfig = JSON.stringify(currentBlockData?.config ?? {});
+    const newConfig = JSON.stringify(newBlockData.config ?? {});
+    if (
+      currentBlockData &&
+      currentBlockData.blockId === newBlockData.blockId &&
+      currentBlockData.content === newBlockData.content &&
+      currentConfig === newConfig
+    ) {
+      return;
+    }
+
+    await renderBlock(newBlockData, requestId);
+    if (requestId !== updateRequestSequence) return;
+    currentBlockData = newBlockData;
+  } catch (error) {
+    console.error('Failed to update siyuan block', error);
   }
-
-  // 判断内容是否变化
-  if (currentBlockData && currentBlockData.content === newBlockData.content) {
-    console.log('No changes detected');
-  }
-
-  // 更新数据
-  currentBlockData = newBlockData;
-  
-  // 重新渲染
-  await renderBlock(currentBlockData);
-  updateElementData(elementId, currentBlockData);
 }
 
 /**
  * 编辑按钮功能
  */
 const handleEdit = (): void => {
-  if (blockId) {
-    getParentWindow()?.triggleHoverBlock(blockId, window.frameElement!.getBoundingClientRect())
-  }
+  const frameRect = window.frameElement?.getBoundingClientRect();
+  if (!blockId || !frameRect) return;
+
+  // The parent Excalidraw frame adds its own offset. Pass the nested frame's
+  // top-left point in the shape expected by the parent bridge.
+  getParentWindow()?.triggleHoverBlock(blockId, {
+    x: frameRect.left,
+    y: frameRect.top,
+  });
 }
 
 /**
@@ -99,7 +135,9 @@ function initButtons(): void {
   const editButton = document.getElementById('edit-button');
 
   if (updateButton) {
-    updateButton.addEventListener('click', handleUpdate);
+    updateButton.addEventListener('click', () => {
+      void handleUpdate();
+    });
   }
 
   if (editButton) {
@@ -113,23 +151,28 @@ function initButtons(): void {
  * 从父页面获取数据并初始化
  */
 async function loadData(): Promise<boolean> {
-  if (!elementId && !blockId) {
-    console.error('No elementId or blockId provided');
+  if (!elementId || !blockId) {
+    console.error('Both elementId and blockId are required');
     return false;
   }
 
-  // 如果有 elementId，从父页面获取数据
-  if (elementId && blockId) {
-    const blockData = await getElementData(elementId, blockId);
+  const requestId = ++updateRequestSequence;
+  try {
+    const blockData = await getElementData(
+      elementId,
+      blockId,
+      () => requestId === updateRequestSequence,
+    );
+    if (requestId !== updateRequestSequence) return false;
     if (blockData) {
+      await renderBlock(blockData, requestId);
       currentBlockData = blockData;
-      await renderBlock(blockData);
       return true;
     }
     console.error('Failed to load block data for element:', elementId);
-    return false;
+  } catch (error) {
+    console.error('Failed to load block data for element:', elementId, error);
   }
-
   return false;
 }
 
@@ -163,5 +206,8 @@ init();
 
 // 页面卸载时清理
 window.addEventListener('unload', () => {
-  vditorPreviewElement = null;
+  updateRequestSequence += 1;
+  renderSequence += 1;
+  removeButtonVisibilityListeners?.();
+  removeButtonVisibilityListeners = null;
 });

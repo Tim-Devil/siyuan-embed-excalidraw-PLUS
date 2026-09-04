@@ -20,24 +20,190 @@ export function needsIframeCapture(element: any): boolean {
  * 获取 iframe 元素
  */
 export function getIframeForElement(element: any): HTMLIFrameElement | null {
+  let expectedURL: URL;
+
   // Markdown 元素
   if (element?.customData?.embedMarkdown) {
     const src = `/plugins/siyuan-embed-excalidraw-plus/embed/markdown/?elementId=${element.id}`;
-    return document.querySelector(
-      `iframe.excalidraw__embeddable[src*="${src}"]`
-    ) as HTMLIFrameElement;
-  }
-
-  // 思源块嵌入（通过 link 中的 blockId 查找）
-  if (element?.link?.startsWith('siyuan://blocks/')) {
+    expectedURL = new URL(src, window.location.origin);
+  } else if (element?.link?.startsWith('siyuan://blocks/')) {
+    // 思源块嵌入（通过 link 中的 blockId 查找）
     const blockId = element.link.split('siyuan://blocks/')[1];
     const src = `/plugins/siyuan-embed-excalidraw-plus/embed/siyuan/?elementId=${element.id}&blockId=${blockId}`;
-    return document.querySelector(
-      `iframe.excalidraw__embeddable[src*="${src}"]`
-    ) as HTMLIFrameElement;
+    expectedURL = new URL(src, window.location.origin);
+  } else {
+    return null;
   }
 
-  return null;
+  return Array.from(
+    document.querySelectorAll<HTMLIFrameElement>('iframe.excalidraw__embeddable'),
+  ).find((iframe) => {
+    try {
+      const actualURL = new URL(
+        iframe.getAttribute('src') || iframe.src,
+        window.location.href,
+      );
+      return (
+        actualURL.origin === expectedURL.origin &&
+        actualURL.pathname === expectedURL.pathname &&
+        actualURL.searchParams.get('elementId') ===
+          expectedURL.searchParams.get('elementId') &&
+        actualURL.searchParams.get('blockId') ===
+          expectedURL.searchParams.get('blockId')
+      );
+    } catch (error) {
+      return false;
+    }
+  }) || null;
+}
+
+export const getIframeVersionNonce = (element: any): number => {
+  const customNonce = element?.customData?.embedIframeVersionNonce;
+  if (Number.isFinite(customNonce)) return customNonce;
+
+  return Number.isFinite(element?.versionNonce) ? element.versionNonce : 0;
+};
+
+export const hasCurrentIframeCache = (
+  element: any,
+  cache: IframeCache | undefined,
+): boolean => Boolean(
+  cache?.dataURL &&
+  cache.embedIframeVersionNonce === getIframeVersionNonce(element) &&
+  cache.width === element.width &&
+  cache.height === element.height,
+);
+
+const isStoredIframeCache = (value: unknown): value is IframeCache => {
+  if (!value || typeof value !== 'object') return false;
+  const cache = value as Partial<IframeCache>;
+  return typeof cache.dataURL === 'string'
+    && cache.dataURL.startsWith('data:')
+    && Number.isFinite(cache.embedIframeVersionNonce)
+    && Number.isFinite(cache.width)
+    && cache.width > 0
+    && Number.isFinite(cache.height)
+    && cache.height > 0;
+};
+
+export const hasCompleteIframeCache = (
+  elements: any[],
+  iframeCacheMap: Map<string, IframeCache>,
+): boolean => elements
+  .filter(needsIframeCapture)
+  .every((element) => hasCurrentIframeCache(element, iframeCacheMap.get(element.id)));
+
+const withTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> => {
+  let timeout = 0;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
+const waitForIframeLoad = (
+  iframe: HTMLIFrameElement,
+  timeoutMs = 10000,
+): Promise<boolean> =>
+  new Promise((resolve) => {
+    let settled = false;
+    let timeout = 0;
+    let expectedURL: URL | null = null;
+    try {
+      const source = iframe.getAttribute('src') || iframe.src;
+      if (source) expectedURL = new URL(source, window.location.href);
+    } catch (error) {
+      expectedURL = null;
+    }
+    const isReady = () => {
+      if (!iframe.isConnected) return false;
+      try {
+        const frameDocument = iframe.contentDocument;
+        if (!frameDocument?.body || frameDocument.readyState !== 'complete') {
+          return false;
+        }
+        if (!frameDocument.URL || frameDocument.URL === 'about:blank') {
+          return false;
+        }
+        if (!expectedURL) return true;
+
+        const loadedURL = new URL(frameDocument.URL, window.location.href);
+        return (
+          loadedURL.origin === expectedURL.origin &&
+          loadedURL.pathname === expectedURL.pathname &&
+          loadedURL.searchParams.get('elementId') ===
+            expectedURL.searchParams.get('elementId') &&
+          loadedURL.searchParams.get('blockId') ===
+            expectedURL.searchParams.get('blockId')
+        );
+      } catch (error) {
+        return false;
+      }
+    };
+    const finish = (loaded: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      iframe.removeEventListener('load', onLoad);
+      iframe.removeEventListener('error', onError);
+      resolve(loaded);
+    };
+    const onLoad = () => {
+      if (isReady()) finish(true);
+    };
+    const onError = () => finish(false);
+    timeout = window.setTimeout(() => finish(false), timeoutMs);
+
+    // A newly-created iframe can emit an about:blank load before its real URL.
+    iframe.addEventListener('load', onLoad);
+    iframe.addEventListener('error', onError, { once: true });
+    if (isReady()) finish(true);
+  });
+
+type IframeWindow = Window & {
+  __EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__?: () => void;
+};
+
+const flushIframePendingInput = async (
+  iframe: HTMLIFrameElement,
+): Promise<void> => {
+  let frameWindow: IframeWindow | null = null;
+  try {
+    frameWindow = iframe.contentWindow as IframeWindow | null;
+    const flush = frameWindow?.__EXCALIDRAW_PLUS_FLUSH_PENDING_INPUT__;
+    if (typeof flush !== 'function') return;
+
+    await withTimeout(
+      Promise.resolve().then(() => flush.call(frameWindow)),
+      1000,
+      'iframe pending input flush timeout',
+    );
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+  } catch (error) {
+    console.warn('Failed to flush iframe input', error);
+  }
+};
+
+/** Flush editor input before a raster save so the iframe nonce and cache key are current. */
+export async function flushAllIframeEdits(elements: any[]): Promise<void> {
+  const elementsToFlush = elements.filter(needsIframeCapture);
+  await processArraySequentially(elementsToFlush, async (element) => {
+    const iframe = getIframeForElement(element);
+    // Give already-mounted frames a short preflush window. The capture pass
+    // performs the full wait for frames that are still mounting.
+    if (!iframe || !(await waitForIframeLoad(iframe, 1000))) return;
+    await flushIframePendingInput(iframe);
+  });
 }
 
 /**
@@ -48,12 +214,19 @@ export async function captureIframe(
 ): Promise<string | null> {
   try {
     if (!iframe.contentDocument?.body) return null;
-    const img = await snapdom.toSvg(iframe.contentDocument.body, {
-      width: iframe.clientWidth,
-      height: iframe.clientHeight,
-      scale: 1,
-      embedFonts: true,
-    });
+    const width = iframe.clientWidth;
+    const height = iframe.clientHeight;
+    if (width <= 0 || height <= 0) return null;
+    const img = await withTimeout(
+      snapdom.toSvg(iframe.contentDocument.body, {
+        width,
+        height,
+        scale: 1,
+        embedFonts: true,
+      }),
+      15000,
+      'iframe capture timeout',
+    );
     return img.src;
   } catch (error) {
     console.error('Failed to capture iframe:', error);
@@ -72,43 +245,56 @@ export async function captureAllIframes(
   const newIframeCacheMap = new Map<string, IframeCache>();
 
   const captureElement = async (element: any) => {
-    let cache = iframeCacheMap.get(element.id);
-    if (cache
-      && cache.dataURL
-      && cache.embedIframeVersionNonce === element.customData?.embedIframeVersionNonce
-      && cache.width === element.width
-      && cache.height === element.height
-    ) {
+    const embedIframeVersionNonce = getIframeVersionNonce(element);
+    const previousCache = iframeCacheMap.get(element.id);
+    const canReusePreviousCache = Boolean(
+      previousCache?.dataURL &&
+      previousCache.width === element.width &&
+      previousCache.height === element.height,
+    );
+    let cache = previousCache;
+    if (hasCurrentIframeCache(element, cache)) {
       newIframeCacheMap.set(element.id, cache);
       return;
     }
     cache = {
       dataURL: null,
-      embedIframeVersionNonce: element.customData?.embedIframeVersionNonce || Math.floor(Math.random() * 10000),
+      embedIframeVersionNonce,
       width: element.width,
       height: element.height,
     } as IframeCache;
     newIframeCacheMap.set(element.id, cache);
 
     const iframe = getIframeForElement(element);
-    if (!iframe) return;
-
-    // 等待 iframe 加载
-    await new Promise<void>((resolve) => {
-      if (iframe.contentDocument?.readyState === 'complete') {
-        resolve();
-      } else {
-        iframe.addEventListener('load', () => resolve(), { once: true });
+    if (!iframe) {
+      if (canReusePreviousCache) {
+        newIframeCacheMap.set(element.id, previousCache);
       }
-    });
+      return;
+    }
 
-    cache.dataURL = await captureIframe(iframe);
-    newIframeCacheMap.set(element.id, cache);
+    if (!(await waitForIframeLoad(iframe))) {
+      if (canReusePreviousCache) {
+        newIframeCacheMap.set(element.id, previousCache);
+      }
+      return;
+    }
+
+    // The frame may have finished loading after the pre-save flush pass.
+    // Flush once more at the capture boundary so its debounce queue cannot
+    // leave the raster behind the scene data.
+    await flushIframePendingInput(iframe);
+    const dataURL = await captureIframe(iframe);
+    if (dataURL) {
+      cache.dataURL = dataURL;
+      newIframeCacheMap.set(element.id, cache);
+    } else if (canReusePreviousCache) {
+      // Keep a known-good frame when a transient iframe load/capture fails.
+      // The old nonce makes the next save retry the capture.
+      newIframeCacheMap.set(element.id, previousCache);
+    }
   };
 
-  // elementsToCapture.forEach(captureElement);
-  // await Promise.all(elementsToCapture.map(captureElement));
-  // await idleTimeSlice(elementsToCapture, captureElement, { chunkTimeout: 500, globalTimeout: 10000 });
   await processArraySequentially(elementsToCapture, captureElement);
 
   return newIframeCacheMap;
@@ -203,7 +389,12 @@ export function computeHash(str: string): string {
 }
 
 const CACHE_VERSION = 1;
-export async function putIframeCacheMap(imageURL: string, iframeCacheMap: Map<string, IframeCache>) {
+const iframeCacheWriteQueues = new Map<string, Promise<void>>();
+
+const writeIframeCacheMap = async (
+  imageURL: string,
+  iframeCacheMap: Map<string, IframeCache>,
+) => {
   const imageHash = computeHash(imageURL);
   const cacheData = {
     cacheVersion: CACHE_VERSION,
@@ -216,25 +407,94 @@ export async function putIframeCacheMap(imageURL: string, iframeCacheMap: Map<st
   formData.append('path', `/temp/siyuan-embed-excalidraw-plus/cache/cache-${imageHash}.json`);
   formData.append('file', file);
   formData.append('isDir', 'false');
-  await fetch('/api/file/putFile', {
-    method: 'POST',
-    body: formData,
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('/api/file/putFile', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+    const responseText = await response.text();
+    let result: any = null;
+    if (responseText) {
+      try {
+        result = JSON.parse(responseText);
+      } catch (error) {
+        // Older SiYuan versions can return an empty or plain-text success body.
+      }
+    }
+    if (!response.ok) throw new Error(`iframe cache HTTP ${response.status}`);
+    if (result && typeof result.code === 'number' && result.code !== 0) {
+      throw new Error(`iframe cache API ${result.code}: ${result.msg || 'unknown error'}`);
+    }
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+export function putIframeCacheMap(
+  imageURL: string,
+  iframeCacheMap: Map<string, IframeCache>,
+): Promise<void> {
+  const imageHash = computeHash(imageURL);
+  const snapshot = new Map<string, IframeCache>(
+    Array.from(
+      iframeCacheMap.entries(),
+      ([id, cache]) => [id, { ...cache }] as const,
+    ),
+  );
+  const previousWrite = iframeCacheWriteQueues.get(imageHash) ?? Promise.resolve();
+  const currentWrite = previousWrite
+    .catch(() => undefined)
+    .then(() => writeIframeCacheMap(imageURL, snapshot));
+  iframeCacheWriteQueues.set(imageHash, currentWrite);
+  currentWrite.then(
+    () => {
+      if (iframeCacheWriteQueues.get(imageHash) === currentWrite) {
+        iframeCacheWriteQueues.delete(imageHash);
+      }
+    },
+    () => {
+      if (iframeCacheWriteQueues.get(imageHash) === currentWrite) {
+        iframeCacheWriteQueues.delete(imageHash);
+      }
+    },
+  );
+  return currentWrite;
 }
 
 export async function getIframeCacheMap(imageURL: string): Promise<Map<string, IframeCache>> {
   const imageHash = computeHash(imageURL);
-  const response = await fetch('/api/file/getFile', {
-    method: 'POST',
-    body: JSON.stringify({
-      path: `/temp/siyuan-embed-excalidraw-plus/cache/cache-${imageHash}.json`,
-    }),
-  });
-  if (response.ok && response.status === 200) {
-    const iframeCacheData = await response.json();
-    if (iframeCacheData.cacheVersion === CACHE_VERSION && iframeCacheData.iframeCacheData) {
-      return new Map<string, IframeCache>(Object.entries(iframeCacheData.iframeCacheData));
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch('/api/file/getFile', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: `/temp/siyuan-embed-excalidraw-plus/cache/cache-${imageHash}.json`,
+      }),
+      signal: controller.signal,
+    });
+    if (response.ok && response.status === 200) {
+      const iframeCacheData = await response.json();
+      if (
+        iframeCacheData.cacheVersion === CACHE_VERSION &&
+        iframeCacheData.imageURL === imageURL &&
+        iframeCacheData.iframeCacheData &&
+        typeof iframeCacheData.iframeCacheData === 'object'
+      ) {
+        return new Map<string, IframeCache>(
+          Object.entries(iframeCacheData.iframeCacheData).filter(
+            ([id, cache]) => typeof id === 'string' && isStoredIframeCache(cache),
+          ) as [string, IframeCache][],
+        );
+      }
     }
+  } catch (error) {
+    console.warn('Failed to load iframe cache', error);
+  } finally {
+    window.clearTimeout(timeout);
   }
   return new Map<string, IframeCache>();
 }

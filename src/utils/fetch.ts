@@ -1,3 +1,4 @@
+import type { IObject, IWebSocketData } from "siyuan";
 
 
 export const fetchPost = (url: string, data?: any, cb?: (response: IWebSocketData) => void, headers?: IObject) => {

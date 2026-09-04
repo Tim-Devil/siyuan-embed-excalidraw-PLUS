@@ -51,7 +51,12 @@
     }
 }
 
-html[data-theme-mode="dark"] img[src^="assets/"][src*="/excalidraw-"] {
+html[data-theme-mode="dark"] img[src*="assets/"][src*="/excalidraw-"],
+html[data-theme-mode="dark"] img[data-src*="assets/"][data-src*="/excalidraw-"],
+html[data-theme-mode="dark"] img[data-original*="assets/"][data-original*="/excalidraw-"],
+html[data-theme-mode="dark"] img[data-lazy-src*="assets/"][data-lazy-src*="/excalidraw-"],
+html[data-theme-mode="dark"] img[srcset*="excalidraw-"],
+html[data-theme-mode="dark"] img[data-srcset*="excalidraw-"] {
     filter: invert(93%) hue-rotate(180deg);
 }
 
