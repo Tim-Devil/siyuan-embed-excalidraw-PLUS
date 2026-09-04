@@ -1,7 +1,7 @@
 From 6a613f93b83b8c023ea60b106d1736488d4c7c4c Mon Sep 17 00:00:00 2001
 From: Mayrain <3220104149@zju.edu.cn>
 Date: Tue, 1 Sep 2026 21:55:28 +0800
-Subject: [PATCH 2/3] feat(fonts): add local system font picker
+Subject: [PATCH 2/4] feat(fonts): add local system font picker
 
 ---
  .../components/FontPicker/FontPicker.scss     |  80 +++++++
@@ -461,6 +461,3 @@ index 19d7157..cd8ad2e 100644
 +    "localFontsUnsupported": "当前环境不支持本机字体读取"
    }
  }
--- 
-2.53.0
-

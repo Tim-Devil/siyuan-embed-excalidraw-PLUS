@@ -1,0 +1,241 @@
+From c330087faf57aa1ac1b946c452ab529243990852 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Sat, 5 Sep 2026 02:26:45 +0800
+Subject: [PATCH] fix(fonts): harden local font inputs and CSS family matching
+
+---
+ .../components/FontPicker/FontPicker.tsx      |  2 +-
+ .../excalidraw/element/textWysiwyg.test.tsx   | 15 ++++++
+ packages/excalidraw/element/textWysiwyg.tsx   | 54 ++++++++++++++++++-
+ packages/excalidraw/fonts/Fonts.ts            | 23 +++++---
+ packages/excalidraw/tests/localFonts.test.ts  | 38 ++++++++++++-
+ 5 files changed, 122 insertions(+), 10 deletions(-)
+
+diff --git a/packages/excalidraw/components/FontPicker/FontPicker.tsx b/packages/excalidraw/components/FontPicker/FontPicker.tsx
+index a3dad4c..a6f6a51 100644
+--- a/packages/excalidraw/components/FontPicker/FontPicker.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPicker.tsx
+@@ -70,7 +70,7 @@ export const FontPicker = React.memo(
+     const defaultFonts = useMemo(() => DEFAULT_FONTS, []);
+     const onSelectCallback = useCallback(
+       (value: number | false) => {
+-        if (value) {
++        if (value !== false) {
+           onSelect(value);
+         }
+       },
+diff --git a/packages/excalidraw/element/textWysiwyg.test.tsx b/packages/excalidraw/element/textWysiwyg.test.tsx
+index 0842e30..db13d74 100644
+--- a/packages/excalidraw/element/textWysiwyg.test.tsx
++++ b/packages/excalidraw/element/textWysiwyg.test.tsx
+@@ -24,6 +24,7 @@ import { API } from "../tests/helpers/api";
+ import { getOriginalContainerHeightFromCache } from "./containerCache";
+ import { getTextEditor, updateTextEditor } from "../tests/queries/dom";
+ import { pointFrom } from "@excalidraw/math";
++import { normalizeFontFamilyStyle } from "./textWysiwyg";
+ 
+ unmountComponent();
+ 
+@@ -32,6 +33,20 @@ const mouse = new Pointer("mouse");
+ 
+ const textEditorSelector = ".excalidraw-textEditorContainer > textarea";
+ 
++describe("normalizeFontFamilyStyle", () => {
++  it("normalizes CSS quoting while preserving characters inside family names", () => {
++    expect(
++      normalizeFontFamilyStyle(`"PLUS, Local Font", sans-serif`),
++    ).toBe(normalizeFontFamilyStyle(`'PLUS, Local Font',sans-serif`));
++    expect(normalizeFontFamilyStyle(`"D'Angelo", sans-serif`)).not.toBe(
++      normalizeFontFamilyStyle(`"DAngelo", sans-serif`),
++    );
++    expect(normalizeFontFamilyStyle(`D'Angelo, sans-serif`)).toContain(
++      "d'angelo",
++    );
++  });
++});
++
+ describe("textWysiwyg", () => {
+   describe("start text editing", () => {
+     const { h } = window;
+diff --git a/packages/excalidraw/element/textWysiwyg.tsx b/packages/excalidraw/element/textWysiwyg.tsx
+index be7e3c4..c3f29a1 100644
+--- a/packages/excalidraw/element/textWysiwyg.tsx
++++ b/packages/excalidraw/element/textWysiwyg.tsx
+@@ -72,8 +72,58 @@ const getTransform = (
+   return `translate(${translateX}px, ${translateY}px) scale(${zoom.value}) rotate(${degree}deg)`;
+ };
+ 
+-const normalizeFontFamilyStyle = (fontFamily: string): string =>
+-  fontFamily.replace(/["']/g, "").replace(/\s+/g, " ").trim().toLowerCase();
++export const normalizeFontFamilyStyle = (fontFamily: string): string => {
++  const families: string[] = [];
++  let currentFamily = "";
++  let quote: '"' | "'" | null = null;
++  let escaped = false;
++
++  for (const character of fontFamily) {
++    if (escaped) {
++      currentFamily += character;
++      escaped = false;
++      continue;
++    }
++    if (character === "\\") {
++      currentFamily += character;
++      escaped = true;
++      continue;
++    }
++    if (quote) {
++      currentFamily += character;
++      if (character === quote) quote = null;
++      continue;
++    }
++    if (
++      (character === '"' || character === "'") &&
++      currentFamily.trim().length === 0
++    ) {
++      currentFamily += character;
++      quote = character;
++      continue;
++    }
++    if (character === ",") {
++      families.push(currentFamily);
++      currentFamily = "";
++      continue;
++    }
++    currentFamily += character;
++  }
++  families.push(currentFamily);
++
++  return families
++    .map((family) => {
++      const trimmedFamily = family.trim();
++      const outerQuote = trimmedFamily[0];
++      const unquotedFamily =
++        (outerQuote === '"' || outerQuote === "'") &&
++        trimmedFamily.at(-1) === outerQuote
++          ? trimmedFamily.slice(1, -1)
++          : trimmedFamily;
++      return unquotedFamily.replace(/\s+/g, " ").toLowerCase();
++    })
++    .join(",");
++};
+ 
+ export const textWysiwyg = ({
+   id,
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index 97b473a..93bc11c 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -391,13 +391,19 @@ export class Fonts {
+       throw new Error("Local Font Access API is unavailable");
+     }
+ 
+-    const fontFaces = await queryLocalFonts.call(window);
++    const queriedFontFaces = await queryLocalFonts.call(window);
++    const fontFaces = Array.isArray(queriedFontFaces) ? queriedFontFaces : [];
+     const families = new Map<string, LocalFontAccessData[]>();
+ 
+     for (const fontFace of fontFaces) {
+       if (
+-        !fontFace.family?.trim() ||
+-        !fontFace.postscriptName?.trim() ||
++        !fontFace ||
++        typeof fontFace.family !== "string" ||
++        !fontFace.family.trim() ||
++        typeof fontFace.postscriptName !== "string" ||
++        !fontFace.postscriptName.trim() ||
++        (fontFace.style !== undefined &&
++          typeof fontFace.style !== "string") ||
+         typeof fontFace.blob !== "function"
+       ) {
+         continue;
+@@ -425,6 +431,7 @@ export class Fonts {
+ 
+       const preferredFace =
+         faces.find((fontFace) =>
++          typeof fontFace.style === "string" &&
+           /^(regular|normal|book|roman)$/i.test(fontFace.style.trim()),
+         ) ?? faces[0];
+ 
+@@ -561,10 +568,14 @@ export class Fonts {
+             const match = matches.find(
+               (fontFace) =>
+                 typeof fontFace?.postscriptName === "string" &&
+-                fontFace.postscriptName.trim() === descriptor.postscriptName,
++                fontFace.postscriptName.trim() === descriptor.postscriptName &&
++                typeof fontFace.family === "string" &&
++                (fontFace.style === undefined ||
++                  typeof fontFace.style === "string") &&
++                typeof fontFace.blob === "function",
+             );
+ 
+-            if (match && typeof match.blob === "function") {
++            if (match) {
+               Fonts.registerLocalFontDescriptor(
+                 {
+                   ...descriptor,
+@@ -848,7 +859,7 @@ export class Fonts {
+ 
+     const descriptor = value as Partial<LocalFontDescriptor>;
+     if (
+-      !Number.isInteger(descriptor.id) ||
++      !Number.isSafeInteger(descriptor.id) ||
+       typeof descriptor.family !== "string" ||
+       !descriptor.family.trim() ||
+       typeof descriptor.postscriptName !== "string" ||
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+index b9abed1..99bd13e 100644
+--- a/packages/excalidraw/tests/localFonts.test.ts
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -58,6 +58,38 @@ afterEach(() => {
+ });
+ 
+ describe("local fonts", () => {
++  it("handles a malformed browser font response as an empty result", async () => {
++    window.queryLocalFonts = vi.fn(async () => null as any);
++
++    await expect(Fonts.queryAndRegisterLocalFonts()).resolves.toEqual({
++      faceCount: 0,
++      familyCount: 0,
++      registeredCount: 0,
++    });
++  });
++
++  it("skips malformed font faces without interrupting valid families", async () => {
++    const validFace = createFontData(
++      "PLUS Valid",
++      "PLUSValid-Regular",
++      "Regular",
++      new ArrayBuffer(0),
++    );
++    window.queryLocalFonts = vi.fn(async () => [
++      { family: 42, postscriptName: "InvalidFamily", blob: vi.fn() },
++      { family: "PLUS Invalid", postscriptName: null, blob: vi.fn() },
++      { family: "PLUS Invalid", postscriptName: "InvalidBlob", blob: null },
++      { family: "PLUS Invalid", postscriptName: "InvalidStyle", style: 42, blob: vi.fn() },
++      validFace,
++    ] as any);
++
++    await expect(Fonts.queryAndRegisterLocalFonts()).resolves.toMatchObject({
++      faceCount: 5,
++      familyCount: 1,
++      registeredCount: 1,
++    });
++  });
++
+   it("enumerates families, reads metrics and persists the descriptor", async () => {
+     window.EXCALIDRAW_LOCAL_FONT_STORAGE_KEY = LOCAL_FONT_STORAGE_TEST_KEY;
+     const metricsBuffer = createMetricsFontBuffer();
+@@ -343,7 +375,11 @@ describe("local fonts", () => {
+     const targetedQuery = vi.fn(
+       async (options?: { postscriptNames?: string[] }) => {
+         expect(options).toEqual({ postscriptNames: [postscriptName] });
+-        return [fontFace];
++        return [
++          { postscriptName, family: 42, style: "Regular", blob: vi.fn() },
++          { postscriptName, family, style: 42, blob: vi.fn() },
++          fontFace,
++        ] as any;
+       },
+     );
+     window.queryLocalFonts = targetedQuery;

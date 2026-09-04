@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const vendorDir = join(root, "vendor", "excalidraw");
 const patchesDir = join(vendorDir, "patches");
-const artifactName = "excalidraw-0.18.0-local-fonts.1.tgz";
+const artifactName = "excalidraw-0.18.0-local-fonts.7.tgz";
 const artifactPath = join(vendorDir, artifactName);
 
 const run = (command, args, cwd) => {
@@ -45,7 +45,7 @@ const runShell = (command, cwd) => {
   }
 };
 
-const workDir = await mkdtemp(join(tmpdir(), "qyl-excalidraw-"));
+const workDir = await mkdtemp(join(tmpdir(), "excalidraw-plus-"));
 const sourceDir = join(workDir, "excalidraw");
 const packDir = join(workDir, "package");
 

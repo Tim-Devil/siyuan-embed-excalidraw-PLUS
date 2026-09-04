@@ -1,0 +1,1875 @@
+From 755074130d022d1d4e6687c10155b5610b35215b Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 18:45:45 +0800
+Subject: [PATCH 4/4] fix(fonts): stabilize local fonts and font controls
+
+---
+ .../actions/actionProperties.test.tsx         |  50 +-
+ .../excalidraw/actions/actionProperties.tsx   | 427 +++++++++++++-----
+ .../components/FontPicker/FontPicker.tsx      |   6 +-
+ .../components/FontPicker/FontPickerList.tsx  | 249 ++++++++--
+ .../FontPicker/keyboardNavHandlers.test.ts    |  66 +++
+ .../FontPicker/keyboardNavHandlers.ts         |  24 +-
+ .../excalidraw/components/ScrollableList.tsx  |   8 +-
+ .../dropdownMenu/DropdownMenuItem.tsx         |   4 +-
+ packages/excalidraw/css/styles.scss           |  40 ++
+ packages/excalidraw/data/restore.ts           |   2 +-
+ packages/excalidraw/element/textWysiwyg.tsx   |  18 +-
+ packages/excalidraw/fonts/Fonts.ts            | 191 +++++++-
+ packages/excalidraw/global.d.ts               |   1 +
+ packages/excalidraw/index.tsx                 |   7 +
+ packages/excalidraw/locales/en.json           |   4 +-
+ packages/excalidraw/locales/zh-CN.json        |   4 +-
+ packages/excalidraw/scene/Shape.ts            |   2 +-
+ packages/excalidraw/tests/appState.test.tsx   |  91 +++-
+ packages/excalidraw/tests/localFonts.test.ts  |  67 +++
+ 19 files changed, 1053 insertions(+), 208 deletions(-)
+ create mode 100644 packages/excalidraw/components/FontPicker/keyboardNavHandlers.test.ts
+
+diff --git a/packages/excalidraw/actions/actionProperties.test.tsx b/packages/excalidraw/actions/actionProperties.test.tsx
+index 80d2ca2..4169e26 100644
+--- a/packages/excalidraw/actions/actionProperties.test.tsx
++++ b/packages/excalidraw/actions/actionProperties.test.tsx
+@@ -1,6 +1,6 @@
+ import React from "react";
+ import { Excalidraw } from "../index";
+-import { queryByTestId } from "@testing-library/react";
++import { fireEvent, queryByTestId, waitFor } from "@testing-library/react";
+ import { render } from "../tests/test-utils";
+ import { UI } from "../tests/helpers/ui";
+ import { API } from "../tests/helpers/api";
+@@ -8,6 +8,14 @@ import { COLOR_PALETTE, DEFAULT_ELEMENT_BACKGROUND_PICKS } from "../colors";
+ import { FONT_FAMILY, STROKE_WIDTH } from "../constants";
+ 
+ describe("element locking", () => {
++  beforeAll(() => {
++    (globalThis as any).ResizeObserver = class {
++      observe() {}
++      unobserve() {}
++      disconnect() {}
++    };
++  });
++
+   beforeEach(async () => {
+     await render(<Excalidraw />);
+   });
+@@ -164,5 +172,45 @@ describe("element locking", () => {
+         "active",
+       );
+     });
++
++    it("keeps the font picker open and updates the selected item", async () => {
++      const text = API.createElement({
++        type: "text",
++        text: "font picker",
++        fontFamily: FONT_FAMILY.Excalifont,
++      });
++      API.setElements([text]);
++      API.setSelectedElements([text]);
++
++      fireEvent.click(queryByTestId(document.body, "font-family-show-fonts")!);
++      await waitFor(() => {
++        expect((window as any).h.state.openPopup).toBe("fontFamily");
++      });
++
++      const fontItem = Array.from(
++        document.querySelectorAll<HTMLButtonElement>(".FontPicker__font-item"),
++      ).find((item) => Number(item.value) === FONT_FAMILY.Nunito);
++      expect(fontItem).toBeDefined();
++      fireEvent.click(fontItem!);
++
++      await waitFor(() => {
++        expect((window as any).h.state.openPopup).toBe("fontFamily");
++        expect(fontItem).toHaveClass("dropdown-menu-item--selected");
++      });
++
++      const alternateFontItem = Array.from(
++        document.querySelectorAll<HTMLButtonElement>(".FontPicker__font-item"),
++      ).find((item) => Number(item.value) === FONT_FAMILY["Comic Shanns"]);
++      expect(alternateFontItem).toBeDefined();
++      fireEvent.mouseMove(alternateFontItem!);
++      fireEvent.pointerLeave(
++        document.querySelector(".FontPicker__popover") as Element,
++      );
++
++      await waitFor(() => {
++        expect((window as any).h.state.openPopup).toBe("fontFamily");
++        expect(fontItem).toHaveClass("dropdown-menu-item--selected");
++      });
++    });
+   });
+ });
+diff --git a/packages/excalidraw/actions/actionProperties.tsx b/packages/excalidraw/actions/actionProperties.tsx
+index 7cfb123..74bb8ac 100644
+--- a/packages/excalidraw/actions/actionProperties.tsx
++++ b/packages/excalidraw/actions/actionProperties.tsx
+@@ -1,4 +1,11 @@
+-import { useEffect, useMemo, useRef, useState } from "react";
++import {
++  useCallback,
++  useEffect,
++  useLayoutEffect,
++  useMemo,
++  useRef,
++  useState,
++} from "react";
+ import type { AppClassProperties, AppState, Primitive } from "../types";
+ import type { CaptureUpdateActionType } from "../store";
+ import {
+@@ -62,6 +69,7 @@ import {
+   DEFAULT_FONT_FAMILY,
+   DEFAULT_FONT_SIZE,
+   FONT_FAMILY,
++  MIN_FONT_SIZE,
+   ROUNDNESS,
+   STROKE_WIDTH,
+   VERTICAL_ALIGN,
+@@ -125,6 +133,100 @@ import { Range } from "../components/Range";
+ 
+ const FONT_SIZE_RELATIVE_INCREASE_STEP = 0.1;
+ 
++const getFontSizeInputValue = (fontSize: number | null) =>
++  fontSize === null ? "" : String(fontSize);
++
++const parseFontSizeInputValue = (inputValue: string) => {
++  const parsedValue = Number(inputValue);
++
++  if (!inputValue.trim() || !Number.isFinite(parsedValue)) {
++    return null;
++  }
++
++  return Math.max(MIN_FONT_SIZE, parsedValue);
++};
++
++const FontSizeInput = ({
++  value,
++  onChange,
++}: {
++  value: number | null;
++  onChange: (value: number) => void;
++}) => {
++  const [inputValue, setInputValue] = useState(getFontSizeInputValue(value));
++  const inputRef = useRef<HTMLInputElement>(null);
++
++  useEffect(() => {
++    // Keep intermediate values such as `27.` while the user is typing. The
++    // parent state updates on every valid keystroke.
++    if (document.activeElement !== inputRef.current) {
++      setInputValue(getFontSizeInputValue(value));
++    }
++  }, [value]);
++
++  const handleInputChange = (nextInputValue: string) => {
++    setInputValue(nextInputValue);
++
++    const parsedValue = Number(nextInputValue);
++    if (
++      nextInputValue.trim() &&
++      Number.isFinite(parsedValue) &&
++      parsedValue >= MIN_FONT_SIZE
++    ) {
++      const nextValue = parseFontSizeInputValue(nextInputValue);
++      if (nextValue !== null && nextValue !== value) {
++        onChange(nextValue);
++      }
++    }
++  };
++
++  const commitInputValue = () => {
++    const nextValue = parseFontSizeInputValue(inputValue);
++
++    if (nextValue === null) {
++      setInputValue(getFontSizeInputValue(value));
++      return;
++    }
++
++    setInputValue(String(nextValue));
++
++    if (nextValue !== value) {
++      onChange(nextValue);
++    }
++  };
++
++  return (
++    <div className="FontSizeInput properties-trigger">
++      <input
++        ref={inputRef}
++        type="text"
++        inputMode="decimal"
++        role="spinbutton"
++        aria-valuemin={MIN_FONT_SIZE}
++        className="properties-trigger"
++        aria-label={t("labels.fontSize")}
++        data-testid="font-size-input"
++        value={inputValue}
++        onChange={(event) => handleInputChange(event.target.value)}
++        onFocus={(event) => event.currentTarget.select()}
++        onBlur={commitInputValue}
++        onKeyDown={(event) => {
++          if (event.key === KEYS.ENTER) {
++            event.preventDefault();
++            event.stopPropagation();
++            commitInputValue();
++          } else if (event.key === KEYS.ESCAPE) {
++            event.preventDefault();
++            event.stopPropagation();
++            setInputValue(getFontSizeInputValue(value));
++          }
++        }}
++      />
++      <span aria-hidden="true">px</span>
++    </div>
++  );
++};
++
+ export const changeProperty = (
+   elements: readonly ExcalidrawElement[],
+   appState: AppState,
+@@ -647,68 +749,69 @@ export const actionChangeFontSize = register({
+   perform: (elements, appState, value, app) => {
+     return changeFontSize(elements, appState, app, () => value, value);
+   },
+-  PanelComponent: ({ elements, appState, updateData, app }) => (
+-    <fieldset>
+-      <legend>{t("labels.fontSize")}</legend>
+-      <ButtonIconSelect
+-        group="font-size"
+-        options={[
+-          {
+-            value: 16,
+-            text: t("labels.small"),
+-            icon: FontSizeSmallIcon,
+-            testId: "fontSize-small",
+-          },
+-          {
+-            value: 20,
+-            text: t("labels.medium"),
+-            icon: FontSizeMediumIcon,
+-            testId: "fontSize-medium",
+-          },
+-          {
+-            value: 28,
+-            text: t("labels.large"),
+-            icon: FontSizeLargeIcon,
+-            testId: "fontSize-large",
+-          },
+-          {
+-            value: 36,
+-            text: t("labels.veryLarge"),
+-            icon: FontSizeExtraLargeIcon,
+-            testId: "fontSize-veryLarge",
+-          },
+-        ]}
+-        value={getFormValue(
+-          elements,
+-          appState,
+-          (element) => {
+-            if (isTextElement(element)) {
+-              return element.fontSize;
+-            }
+-            const boundTextElement = getBoundTextElement(
+-              element,
+-              app.scene.getNonDeletedElementsMap(),
+-            );
+-            if (boundTextElement) {
+-              return boundTextElement.fontSize;
+-            }
+-            return null;
+-          },
+-          (element) =>
+-            isTextElement(element) ||
+-            getBoundTextElement(
+-              element,
+-              app.scene.getNonDeletedElementsMap(),
+-            ) !== null,
+-          (hasSelection) =>
+-            hasSelection
+-              ? null
+-              : appState.currentItemFontSize || DEFAULT_FONT_SIZE,
+-        )}
+-        onChange={(value) => updateData(value)}
+-      />
+-    </fieldset>
+-  ),
++  PanelComponent: ({ elements, appState, updateData, app }) => {
++    const fontSize = getFormValue(
++      elements,
++      appState,
++      (element) => {
++        if (isTextElement(element)) {
++          return element.fontSize;
++        }
++        const boundTextElement = getBoundTextElement(
++          element,
++          app.scene.getNonDeletedElementsMap(),
++        );
++        if (boundTextElement) {
++          return boundTextElement.fontSize;
++        }
++        return null;
++      },
++      (element) =>
++        isTextElement(element) ||
++        getBoundTextElement(element, app.scene.getNonDeletedElementsMap()) !==
++          null,
++      (hasSelection) =>
++        hasSelection ? null : appState.currentItemFontSize || DEFAULT_FONT_SIZE,
++    );
++
++    return (
++      <fieldset>
++        <legend>{t("labels.fontSize")}</legend>
++        <ButtonIconSelect
++          group="font-size"
++          options={[
++            {
++              value: 16,
++              text: t("labels.small"),
++              icon: FontSizeSmallIcon,
++              testId: "fontSize-small",
++            },
++            {
++              value: 20,
++              text: t("labels.medium"),
++              icon: FontSizeMediumIcon,
++              testId: "fontSize-medium",
++            },
++            {
++              value: 28,
++              text: t("labels.large"),
++              icon: FontSizeLargeIcon,
++              testId: "fontSize-large",
++            },
++            {
++              value: 36,
++              text: t("labels.veryLarge"),
++              icon: FontSizeExtraLargeIcon,
++              testId: "fontSize-veryLarge",
++            },
++          ]}
++          value={fontSize}
++          onChange={(value) => updateData(value)}
++        />
++        <FontSizeInput value={fontSize} onChange={updateData} />
++      </fieldset>
++    );
++  },
+ });
+ 
+ export const actionDecreaseFontSize = register({
+@@ -976,11 +1079,80 @@ export const actionChangeFontFamily = register({
+   },
+   PanelComponent: ({ elements, appState, app, updateData }) => {
+     const cachedElementsRef = useRef<Map<string, ExcalidrawElement>>(new Map());
++    const popupCacheInitializedRef = useRef(false);
++    const committedFontFamilyRef = useRef<FontFamilyValues | null>(null);
++    const [committedFontFamily, setCommittedFontFamily] =
++      useState<FontFamilyValues | null>(null);
+     const prevSelectedFontFamilyRef = useRef<number | null>(null);
+     // relying on state batching as multiple `FontPicker` handlers could be called in rapid succession and we want to combine them
+     const [batchedData, setBatchedData] = useState<ChangeFontFamilyData>({});
+     const isUnmounted = useRef(true);
+ 
++    const captureFontFamilyPopupElements = useCallback(() => {
++      cachedElementsRef.current.clear();
++
++      const currentAppState = app.state;
++      const currentElements = app.scene.getNonDeletedElements();
++      const { editingTextElement } = currentAppState;
++
++      if (editingTextElement?.type === "text") {
++        const latesteditingTextElement = app.scene.getElement(
++          editingTextElement.id,
++        );
++
++        cachedElementsRef.current.set(
++          editingTextElement.id,
++          newElementWith(
++            latesteditingTextElement || editingTextElement,
++            {},
++            true,
++          ),
++        );
++      } else {
++        const selectedElements = getSelectedElements(
++          currentElements,
++          currentAppState,
++          {
++            includeBoundTextElement: true,
++          },
++        );
++
++        for (const element of selectedElements) {
++          cachedElementsRef.current.set(
++            element.id,
++            newElementWith(element, {}, true),
++          );
++        }
++      }
++    }, [app]);
++
++    const initializeFontFamilyPopup = useCallback(() => {
++      if (popupCacheInitializedRef.current) {
++        return;
++      }
++
++      popupCacheInitializedRef.current = true;
++      committedFontFamilyRef.current = null;
++      setCommittedFontFamily(null);
++      captureFontFamilyPopupElements();
++
++      setBatchedData({
++        openPopup: "fontFamily",
++      });
++    }, [captureFontFamilyPopupElements]);
++
++    useEffect(() => {
++      if (appState.openPopup === "fontFamily") {
++        initializeFontFamilyPopup();
++        return;
++      }
++
++      popupCacheInitializedRef.current = false;
++      committedFontFamilyRef.current = null;
++      setCommittedFontFamily(null);
++      cachedElementsRef.current.clear();
++    }, [appState.openPopup, initializeFontFamilyPopup]);
++
+     const selectedFontFamily = useMemo(() => {
+       const getFontFamily = (
+         elementsArray: readonly ExcalidrawElement[],
+@@ -1008,11 +1180,15 @@ export const actionChangeFontFamily = register({
+               : appState.currentItemFontFamily || DEFAULT_FONT_FAMILY,
+         );
+ 
+-      // popup opened, use cached elements
++      // Keep the popup selection stable while the pointer previews other
++      // fonts. The cached elements represent the state at popup open.
+       if (
+-        batchedData.openPopup === "fontFamily" &&
++        popupCacheInitializedRef.current &&
+         appState.openPopup === "fontFamily"
+       ) {
++        if (committedFontFamily !== null) {
++          return committedFontFamily;
++        }
+         return getFontFamily(
+           Array.from(cachedElementsRef.current?.values() ?? []),
+           cachedElementsRef.current,
+@@ -1026,13 +1202,32 @@ export const actionChangeFontFamily = register({
+ 
+       // popup props are not in sync, hence we are in the middle of an update, so keeping the previous value we've had
+       return prevSelectedFontFamilyRef.current;
+-    }, [batchedData.openPopup, appState, elements, app.scene]);
++    }, [
++      batchedData.openPopup,
++      appState,
++      elements,
++      app.scene,
++      committedFontFamily,
++    ]);
+ 
+     useEffect(() => {
+       prevSelectedFontFamilyRef.current = selectedFontFamily;
+     }, [selectedFontFamily]);
+ 
++    useLayoutEffect(() => {
++      if (batchedData.openPopup) {
++        updateData(batchedData);
++        setBatchedData({});
++      }
++      // open and committed font changes should reach the app state before paint
++      // eslint-disable-next-line react-hooks/exhaustive-deps
++    }, [batchedData.openPopup]);
++
+     useEffect(() => {
++      if (batchedData.openPopup) {
++        return;
++      }
++
+       if (Object.keys(batchedData).length) {
+         updateData(batchedData);
+         // reset the data after we've used the data
+@@ -1058,16 +1253,29 @@ export const actionChangeFontFamily = register({
+           selectedFontFamily={selectedFontFamily}
+           hoveredFontFamily={appState.currentHoveredFontFamily}
+           onSelect={(fontFamily) => {
++            const popupWasOpen =
++              popupCacheInitializedRef.current ||
++              appState.openPopup === "fontFamily";
++
++            if (popupWasOpen) {
++              committedFontFamilyRef.current = fontFamily;
++              setCommittedFontFamily(fontFamily);
++            }
++
+             setBatchedData({
+-              openPopup: null,
++              openPopup: popupWasOpen ? "fontFamily" : null,
+               currentHoveredFontFamily: null,
+               currentItemFontFamily: fontFamily,
+             });
+-
+-            // defensive clear so immediate close won't abuse the cached elements
+-            cachedElementsRef.current.clear();
+           }}
+           onHover={(fontFamily) => {
++            if (
++              popupCacheInitializedRef.current &&
++              cachedElementsRef.current.size === 0
++            ) {
++              captureFontFamilyPopupElements();
++            }
++
+             setBatchedData({
+               currentHoveredFontFamily: fontFamily,
+               cachedElements: new Map(cachedElementsRef.current),
+@@ -1075,63 +1283,40 @@ export const actionChangeFontFamily = register({
+             });
+           }}
+           onLeave={() => {
+-            setBatchedData({
+-              currentHoveredFontFamily: null,
+-              cachedElements: new Map(cachedElementsRef.current),
+-              resetAll: true,
+-            });
++            const committedFontFamily = committedFontFamilyRef.current;
++            setBatchedData(
++              committedFontFamily === null
++                ? {
++                    currentHoveredFontFamily: null,
++                    cachedElements: new Map(cachedElementsRef.current),
++                    resetAll: true,
++                  }
++                : {
++                    currentHoveredFontFamily: null,
++                    currentItemFontFamily: committedFontFamily,
++                  },
++            );
+           }}
+           onPopupChange={(open) => {
+             if (open) {
+-              // open, populate the cache from scratch
+-              cachedElementsRef.current.clear();
+-
+-              const { editingTextElement } = appState;
+-
+-              // still check type to be safe
+-              if (editingTextElement?.type === "text") {
+-                // retrieve the latest version from the scene, as `editingTextElement` isn't mutated
+-                const latesteditingTextElement = app.scene.getElement(
+-                  editingTextElement.id,
+-                );
+-
+-                // inside the wysiwyg editor
+-                cachedElementsRef.current.set(
+-                  editingTextElement.id,
+-                  newElementWith(
+-                    latesteditingTextElement || editingTextElement,
+-                    {},
+-                    true,
+-                  ),
+-                );
+-              } else {
+-                const selectedElements = getSelectedElements(
+-                  elements,
+-                  appState,
+-                  {
+-                    includeBoundTextElement: true,
+-                  },
+-                );
+-
+-                for (const element of selectedElements) {
+-                  cachedElementsRef.current.set(
+-                    element.id,
+-                    newElementWith(element, {}, true),
+-                  );
+-                }
+-              }
+-
+-              setBatchedData({
+-                openPopup: "fontFamily",
+-              });
++              initializeFontFamilyPopup();
+             } else {
++              popupCacheInitializedRef.current = false;
++              const committedFontFamily = committedFontFamilyRef.current;
++
+               // close, use the cache and clear it afterwards
+-              const data = {
++              const data: ChangeFontFamilyData = {
+                 openPopup: null,
+                 currentHoveredFontFamily: null,
+-                cachedElements: new Map(cachedElementsRef.current),
+-                resetAll: true,
+-              } as ChangeFontFamilyData;
++                ...(committedFontFamily === null
++                  ? {
++                      cachedElements: new Map(cachedElementsRef.current),
++                      resetAll: true,
++                    }
++                  : {
++                      currentItemFontFamily: committedFontFamily,
++                    }),
++              };
+ 
+               if (isUnmounted.current) {
+                 // in case the component was unmounted by the parent, trigger the update directly
+@@ -1140,6 +1325,8 @@ export const actionChangeFontFamily = register({
+                 setBatchedData(data);
+               }
+ 
++              committedFontFamilyRef.current = null;
++              setCommittedFontFamily(null);
+               cachedElementsRef.current.clear();
+             }
+           }}
+diff --git a/packages/excalidraw/components/FontPicker/FontPicker.tsx b/packages/excalidraw/components/FontPicker/FontPicker.tsx
+index 4585c58..a3dad4c 100644
+--- a/packages/excalidraw/components/FontPicker/FontPicker.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPicker.tsx
+@@ -90,12 +90,12 @@ export const FontPicker = React.memo(
+           <FontPickerTrigger selectedFontFamily={selectedFontFamily} />
+           {isOpened && (
+             <FontPickerList
++              initialFonts={defaultFonts}
+               selectedFontFamily={selectedFontFamily}
+               hoveredFontFamily={hoveredFontFamily}
+               onSelect={onSelectCallback}
+               onHover={onHover}
+               onLeave={onLeave}
+-              onOpen={() => onPopupChange(true)}
+               onClose={() => onPopupChange(false)}
+             />
+           )}
+@@ -103,8 +103,4 @@ export const FontPicker = React.memo(
+       </div>
+     );
+   },
+-  (prev, next) =>
+-    prev.isOpened === next.isOpened &&
+-    prev.selectedFontFamily === next.selectedFontFamily &&
+-    prev.hoveredFontFamily === next.hoveredFontFamily,
+ );
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index 680a394..e39dc51 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -37,12 +37,16 @@ export interface FontDescriptor {
+ }
+ 
+ interface FontPickerListProps {
++  initialFonts: readonly {
++    value: number;
++    icon: JSX.Element;
++    text: string;
++  }[];
+   selectedFontFamily: FontFamilyValues | null;
+   hoveredFontFamily: FontFamilyValues | null;
+   onSelect: (value: number) => void;
+   onHover: (value: number) => void;
+   onLeave: () => void;
+-  onOpen: () => void;
+   onClose: () => void;
+ }
+ 
+@@ -53,6 +57,8 @@ type LocalFontStatus =
+   | { type: "unsupported" }
+   | { type: "error" };
+ 
++const LOCAL_FONT_RENDER_BATCH_SIZE = 25;
++
+ const stripSerializedFontFamilyQuotes = (fontFamily: string) => {
+   const trimmedFontFamily = fontFamily.trim();
+   const firstCharacter = trimmedFontFamily[0];
+@@ -67,7 +73,7 @@ const stripSerializedFontFamilyQuotes = (fontFamily: string) => {
+   return trimmedFontFamily;
+ };
+ 
+-const getFontDescriptors = () =>
++const getFontDescriptors = (): FontDescriptor[] =>
+   Array.from(Fonts.registered.entries())
+     .filter(([, { metadata }]) => !metadata.serverSide && !metadata.fallback)
+     .map(([familyId, { metadata, fontFaces }]) => {
+@@ -99,14 +105,36 @@ const getFontDescriptors = () =>
+       a.text.localeCompare(b.text, undefined, { sensitivity: "base" }),
+     );
+ 
++let cachedFontDescriptors: {
++  registrySize: number;
++  localFontRevision: number;
++  descriptors: FontDescriptor[];
++} | null = null;
++
++const getCachedFontDescriptors = () => {
++  const registrySize = Fonts.registered.size;
++  const localFontRevision = Fonts.getLocalFontRevision();
++
++  if (
++    cachedFontDescriptors?.registrySize === registrySize &&
++    cachedFontDescriptors.localFontRevision === localFontRevision
++  ) {
++    return cachedFontDescriptors.descriptors;
++  }
++
++  const descriptors = getFontDescriptors();
++  cachedFontDescriptors = { registrySize, localFontRevision, descriptors };
++  return descriptors;
++};
++
+ export const FontPickerList = React.memo(
+   ({
++    initialFonts,
+     selectedFontFamily,
+     hoveredFontFamily,
+     onSelect,
+     onHover,
+     onLeave,
+-    onOpen,
+     onClose,
+   }: FontPickerListProps) => {
+     const { container } = useExcalidrawContainer();
+@@ -114,7 +142,17 @@ export const FontPickerList = React.memo(
+     const { showDeprecatedFonts } = useAppProps();
+ 
+     const [searchTerm, setSearchTerm] = useState("");
+-    const [allFonts, setAllFonts] = useState(getFontDescriptors);
++    const initialFontDescriptors = useMemo(
++      () =>
++        initialFonts.map((font) => ({
++          ...font,
++          source: "builtIn" as const,
++        })),
++      [initialFonts],
++    );
++    const [allFonts, setAllFonts] = useState<FontDescriptor[]>(
++      initialFontDescriptors,
++    );
+     const [localFontStatus, setLocalFontStatus] = useState<LocalFontStatus>(
+       () =>
+         Fonts.supportsLocalFontAccess()
+@@ -122,13 +160,66 @@ export const FontPickerList = React.memo(
+           : { type: "unsupported" },
+     );
+     const inputRef = useRef<HTMLInputElement>(null);
++    const mountedRef = useRef(true);
++    const selectionRequestRef = useRef(0);
++    const debouncedSetSearchTerm = useMemo(
++      () => debounce((term: string) => setSearchTerm(term), 20),
++      [],
++    );
++
++    useEffect(() => {
++      return () => {
++        mountedRef.current = false;
++        selectionRequestRef.current += 1;
++        debouncedSetSearchTerm.cancel();
++      };
++    }, [debouncedSetSearchTerm]);
++
++    useEffect(() => {
++      let cancelled = false;
++      let idleCallback: number | undefined;
++      let timeout: number | undefined;
++      const idleWindow = window as Window & {
++        requestIdleCallback?: (
++          callback: () => void,
++          options?: { timeout: number },
++        ) => number;
++        cancelIdleCallback?: (handle: number) => void;
++      };
++      const frame = window.requestAnimationFrame(() => {
++        const loadDescriptors = () => {
++          if (!cancelled) {
++            setAllFonts(getCachedFontDescriptors());
++          }
++        };
++
++        if (idleWindow.requestIdleCallback) {
++          idleCallback = idleWindow.requestIdleCallback(loadDescriptors, {
++            timeout: 250,
++          });
++        } else {
++          timeout = window.setTimeout(loadDescriptors, 32);
++        }
++      });
++
++      return () => {
++        cancelled = true;
++        window.cancelAnimationFrame(frame);
++        if (idleCallback !== undefined) {
++          idleWindow.cancelIdleCallback?.(idleCallback);
++        }
++        if (timeout !== undefined) {
++          window.clearTimeout(timeout);
++        }
++      };
++    }, []);
+ 
+     const loadLocalFonts = useCallback(async () => {
+       setLocalFontStatus({ type: "loading" });
+ 
+       try {
+         const result = await Fonts.queryAndRegisterLocalFonts();
+-        setAllFonts(getFontDescriptors());
++        setAllFonts(getCachedFontDescriptors());
+         setLocalFontStatus({
+           type: "ready",
+           count: result.registeredCount,
+@@ -141,8 +232,11 @@ export const FontPickerList = React.memo(
+ 
+     const selectFont = useCallback(
+       async (fontFamily: number) => {
++        const requestId = ++selectionRequestRef.current;
+         await Fonts.prepareLocalFont(fontFamily);
+-        onSelect(fontFamily);
++        if (mountedRef.current && requestId === selectionRequestRef.current) {
++          onSelect(fontFamily);
++        }
+       },
+       [onSelect],
+     );
+@@ -184,33 +278,34 @@ export const FontPickerList = React.memo(
+     }, [sceneFonts, availableFonts, searchTerm]);
+ 
+     const hoveredFont = useMemo(() => {
+-      let font;
++      if (hoveredFontFamily !== null) {
++        return filteredFonts.find((font) => font.value === hoveredFontFamily);
++      }
+ 
+-      if (hoveredFontFamily) {
+-        font = filteredFonts.find((font) => font.value === hoveredFontFamily);
+-      } else if (selectedFontFamily) {
+-        font = filteredFonts.find((font) => font.value === selectedFontFamily);
++      if (selectedFontFamily !== null) {
++        return filteredFonts.find((font) => font.value === selectedFontFamily);
+       }
+ 
+-      if (!font && searchTerm) {
+-        if (filteredFonts[0]?.value) {
+-          // hover first element on search
+-          onHover(filteredFonts[0].value);
+-        } else {
+-          // re-render cache on no results
++      return undefined;
++    }, [hoveredFontFamily, selectedFontFamily, filteredFonts]);
++
++    useEffect(() => {
++      if (!searchTerm) {
++        if (hoveredFontFamily !== null) {
+           onLeave();
+         }
++        return;
+       }
+ 
+-      return font;
+-    }, [
+-      hoveredFontFamily,
+-      selectedFontFamily,
+-      searchTerm,
+-      filteredFonts,
+-      onHover,
+-      onLeave,
+-    ]);
++      const firstFont = filteredFonts[0];
++      if (firstFont) {
++        if (hoveredFontFamily !== firstFont.value) {
++          onHover(firstFont.value);
++        }
++      } else if (hoveredFontFamily !== null) {
++        onLeave();
++      }
++    }, [searchTerm, filteredFonts, hoveredFontFamily, onHover, onLeave]);
+ 
+     const onKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
+       (event) => {
+@@ -232,15 +327,6 @@ export const FontPickerList = React.memo(
+       [hoveredFont, filteredFonts, selectFont, onHover, onClose],
+     );
+ 
+-    useEffect(() => {
+-      onOpen();
+-
+-      return () => {
+-        onClose();
+-      };
+-      // eslint-disable-next-line react-hooks/exhaustive-deps
+-    }, []);
+-
+     const builtInFilteredFonts = useMemo(
+       () => filteredFonts.filter((font) => font.source === "builtIn"),
+       [filteredFonts],
+@@ -251,10 +337,85 @@ export const FontPickerList = React.memo(
+       [filteredFonts],
+     );
+ 
++    const [renderedLocalFontCount, setRenderedLocalFontCount] = useState(
++      LOCAL_FONT_RENDER_BATCH_SIZE,
++    );
++    const [additionalLocalFontFamily, setAdditionalLocalFontFamily] = useState<
++      number | null
++    >(null);
++    useEffect(() => {
++      setRenderedLocalFontCount(
++        Math.min(localFilteredFonts.length, LOCAL_FONT_RENDER_BATCH_SIZE),
++      );
++      setAdditionalLocalFontFamily(null);
++    }, [localFilteredFonts]);
++
++    const loadMoreLocalFonts = useCallback(() => {
++      setRenderedLocalFontCount((count) =>
++        Math.min(
++          count + LOCAL_FONT_RENDER_BATCH_SIZE,
++          localFilteredFonts.length,
++        ),
++      );
++    }, [localFilteredFonts.length]);
++
++    const onListScroll = useCallback(
++      (event: React.UIEvent<HTMLDivElement>) => {
++        const list = event.currentTarget;
++        if (
++          list.scrollTop + list.clientHeight >=
++          list.scrollHeight - list.clientHeight
++        ) {
++          loadMoreLocalFonts();
++        }
++      },
++      [loadMoreLocalFonts],
++    );
++
++    useEffect(() => {
++      const targetFontFamily = hoveredFontFamily ?? selectedFontFamily;
++      if (targetFontFamily === null) {
++        setAdditionalLocalFontFamily(null);
++        return;
++      }
++
++      const localFontIndex = localFilteredFonts.findIndex(
++        (font) => font.value === targetFontFamily,
++      );
++      if (localFontIndex >= 0) {
++        if (localFontIndex < renderedLocalFontCount) {
++          setAdditionalLocalFontFamily(null);
++        } else {
++          setAdditionalLocalFontFamily(targetFontFamily);
++        }
++      }
++    }, [
++      hoveredFontFamily,
++      selectedFontFamily,
++      localFilteredFonts,
++      renderedLocalFontCount,
++    ]);
++
++    const renderedLocalFonts = useMemo(() => {
++      const visibleFonts = localFilteredFonts.slice(0, renderedLocalFontCount);
++      if (
++        additionalLocalFontFamily !== null &&
++        !visibleFonts.some((font) => font.value === additionalLocalFontFamily)
++      ) {
++        const additionalFont = localFilteredFonts.find(
++          (font) => font.value === additionalLocalFontFamily,
++        );
++        if (additionalFont) {
++          visibleFonts.push(additionalFont);
++        }
++      }
++      return visibleFonts;
++    }, [additionalLocalFontFamily, localFilteredFonts, renderedLocalFontCount]);
++
+     const renderFont = (font: FontDescriptor, index: number) => (
+       <DropdownMenuItem
+         key={font.value}
+-        className="FontPicker__font-item"
++        className="FontPicker__font-item properties-trigger"
+         icon={font.icon}
+         value={font.value}
+         order={index}
+@@ -307,8 +468,11 @@ export const FontPickerList = React.memo(
+           })}
+           key="local-fonts"
+         >
+-          {localFilteredFonts.map((font, index) =>
+-            renderFont(font, index + builtInFilteredFonts.length),
++          {renderedLocalFonts.map((font) =>
++            renderFont(
++              font,
++              builtInFilteredFonts.length + localFilteredFonts.indexOf(font),
++            ),
+           )}
+         </DropdownMenuGroup>,
+       );
+@@ -324,7 +488,7 @@ export const FontPickerList = React.memo(
+       >
+         <div className="FontPicker__local-fonts">
+           <button
+-            className="FontPicker__local-fonts-button"
++            className="FontPicker__local-fonts-button properties-trigger"
+             type="button"
+             disabled={
+               localFontStatus.type === "loading" ||
+@@ -361,19 +525,18 @@ export const FontPickerList = React.memo(
+         </div>
+         <QuickSearch
+           ref={inputRef}
++          className="properties-trigger"
+           placeholder={t("quickSearch.placeholder")}
+-          onChange={debounce(setSearchTerm, 20)}
++          onChange={debouncedSetSearchTerm}
+         />
+         <ScrollableList
+           className="dropdown-menu fonts manual-hover"
+           placeholder={t("fontList.empty")}
++          onScroll={onListScroll}
+         >
+           {groups.length ? groups : null}
+         </ScrollableList>
+       </PropertiesPopover>
+     );
+   },
+-  (prev, next) =>
+-    prev.selectedFontFamily === next.selectedFontFamily &&
+-    prev.hoveredFontFamily === next.hoveredFontFamily,
+ );
+diff --git a/packages/excalidraw/components/FontPicker/keyboardNavHandlers.test.ts b/packages/excalidraw/components/FontPicker/keyboardNavHandlers.test.ts
+new file mode 100644
+index 0000000..098fb97
+--- /dev/null
++++ b/packages/excalidraw/components/FontPicker/keyboardNavHandlers.test.ts
+@@ -0,0 +1,66 @@
++import { vi } from "vitest";
++import { fontPickerKeyHandler } from "./keyboardNavHandlers";
++
++const createEvent = (key: string) =>
++  ({
++    key,
++    ctrlKey: false,
++    metaKey: false,
++    shiftKey: false,
++    preventDefault: vi.fn(),
++    stopPropagation: vi.fn(),
++  } as any);
++
++const createFont = (value: number) => ({ value } as any);
++
++describe("font picker keyboard navigation", () => {
++  const fonts = [createFont(1), createFont(2), createFont(3)];
++
++  it("wraps upward from the first item to the last item", () => {
++    const onHover = vi.fn();
++
++    fontPickerKeyHandler({
++      event: createEvent("ArrowUp"),
++      inputRef: { current: null },
++      hoveredFont: fonts[0],
++      filteredFonts: fonts,
++      onClose: vi.fn(),
++      onSelect: vi.fn(),
++      onHover,
++    });
++
++    expect(onHover).toHaveBeenCalledWith(3);
++  });
++
++  it("wraps downward from the last item to the first item", () => {
++    const onHover = vi.fn();
++
++    fontPickerKeyHandler({
++      event: createEvent("ArrowDown"),
++      inputRef: { current: null },
++      hoveredFont: fonts[2],
++      filteredFonts: fonts,
++      onClose: vi.fn(),
++      onSelect: vi.fn(),
++      onHover,
++    });
++
++    expect(onHover).toHaveBeenCalledWith(1);
++  });
++
++  it("uses the filtered list when the hovered item is stale", () => {
++    const onHover = vi.fn();
++
++    fontPickerKeyHandler({
++      event: createEvent("ArrowUp"),
++      inputRef: { current: null },
++      hoveredFont: createFont(99),
++      filteredFonts: fonts,
++      onClose: vi.fn(),
++      onSelect: vi.fn(),
++      onHover,
++    });
++
++    expect(onHover).toHaveBeenCalledWith(3);
++  });
++});
+diff --git a/packages/excalidraw/components/FontPicker/keyboardNavHandlers.ts b/packages/excalidraw/components/FontPicker/keyboardNavHandlers.ts
+index 19c4adc..08c7ae2 100644
+--- a/packages/excalidraw/components/FontPicker/keyboardNavHandlers.ts
++++ b/packages/excalidraw/components/FontPicker/keyboardNavHandlers.ts
+@@ -45,20 +45,28 @@ export const fontPickerKeyHandler = ({
+   }
+ 
+   if (event.key === KEYS.ARROW_DOWN) {
+-    if (hoveredFont?.next) {
+-      onHover(hoveredFont.next.value);
+-    } else if (filteredFonts[0]?.value) {
+-      onHover(filteredFonts[0].value);
++    if (filteredFonts.length) {
++      const currentIndex = hoveredFont
++        ? filteredFonts.findIndex((font) => font.value === hoveredFont.value)
++        : -1;
++      const nextIndex =
++        currentIndex >= 0 ? (currentIndex + 1) % filteredFonts.length : 0;
++      onHover(filteredFonts[nextIndex].value);
+     }
+ 
+     return true;
+   }
+ 
+   if (event.key === KEYS.ARROW_UP) {
+-    if (hoveredFont?.prev) {
+-      onHover(hoveredFont.prev.value);
+-    } else if (filteredFonts[filteredFonts.length - 1]?.value) {
+-      onHover(filteredFonts[filteredFonts.length - 1].value);
++    if (filteredFonts.length) {
++      const currentIndex = hoveredFont
++        ? filteredFonts.findIndex((font) => font.value === hoveredFont.value)
++        : -1;
++      const previousIndex =
++        currentIndex >= 0
++          ? (currentIndex - 1 + filteredFonts.length) % filteredFonts.length
++          : filteredFonts.length - 1;
++      onHover(filteredFonts[previousIndex].value);
+     }
+ 
+     return true;
+diff --git a/packages/excalidraw/components/ScrollableList.tsx b/packages/excalidraw/components/ScrollableList.tsx
+index 60ca1ad..e44bd13 100644
+--- a/packages/excalidraw/components/ScrollableList.tsx
++++ b/packages/excalidraw/components/ScrollableList.tsx
+@@ -7,17 +7,23 @@ interface ScrollableListProps {
+   className?: string;
+   placeholder: string;
+   children: React.ReactNode;
++  onScroll?: React.UIEventHandler<HTMLDivElement>;
+ }
+ 
+ export const ScrollableList = ({
+   className,
+   placeholder,
+   children,
++  onScroll,
+ }: ScrollableListProps) => {
+   const isEmpty = !Children.count(children);
+ 
+   return (
+-    <div className={clsx("ScrollableList__wrapper", className)} role="menu">
++    <div
++      className={clsx("ScrollableList__wrapper", className)}
++      role="menu"
++      onScroll={onScroll}
++    >
+       {isEmpty ? <div className="empty">{placeholder}</div> : children}
+     </div>
+   );
+diff --git a/packages/excalidraw/components/dropdownMenu/DropdownMenuItem.tsx b/packages/excalidraw/components/dropdownMenu/DropdownMenuItem.tsx
+index 1ff53f8..f697be4 100644
+--- a/packages/excalidraw/components/dropdownMenu/DropdownMenuItem.tsx
++++ b/packages/excalidraw/components/dropdownMenu/DropdownMenuItem.tsx
+@@ -41,9 +41,9 @@ const DropdownMenuItem = ({
+     if (hovered) {
+       if (order === 0) {
+         // scroll into the first item differently, so it's visible what is above (i.e. group title)
+-        ref.current?.scrollIntoView({ block: "end" });
++        ref.current?.scrollIntoView?.({ block: "end" });
+       } else {
+-        ref.current?.scrollIntoView({ block: "nearest" });
++        ref.current?.scrollIntoView?.({ block: "nearest" });
+       }
+     }
+   }, [hovered, order]);
+diff --git a/packages/excalidraw/css/styles.scss b/packages/excalidraw/css/styles.scss
+index 6f1d9cd..c64c9c4 100644
+--- a/packages/excalidraw/css/styles.scss
++++ b/packages/excalidraw/css/styles.scss
+@@ -197,6 +197,46 @@ body.excalidraw-cursor-resize * {
+       padding: 0;
+       border: none;
+     }
++
++    .FontSizeInput {
++      display: flex;
++      align-items: center;
++      height: 2rem;
++      margin-top: 0.25rem;
++      border: 1px solid var(--default-border-color);
++      border-radius: var(--border-radius-md);
++      background: var(--button-bg, var(--color-surface-mid));
++      color: var(--text-primary-color);
++
++      &:focus-within {
++        border-color: var(--color-brand-hover);
++        box-shadow: 0 0 0 1px var(--color-brand-hover);
++      }
++
++      input {
++        min-width: 0;
++        width: 100%;
++        height: 100%;
++        box-sizing: border-box;
++        padding: 0 0.5rem;
++        border: 0;
++        outline: 0;
++        background: transparent;
++        color: inherit;
++        font: inherit;
++
++        &:focus-visible {
++          box-shadow: none;
++        }
++      }
++
++      span {
++        padding-inline-end: 0.5rem;
++        color: var(--color-gray-60);
++        font-size: 0.75rem;
++        user-select: none;
++      }
++    }
+   }
+ 
+   .divider {
+diff --git a/packages/excalidraw/data/restore.ts b/packages/excalidraw/data/restore.ts
+index 8c8da70..e888870 100644
+--- a/packages/excalidraw/data/restore.ts
++++ b/packages/excalidraw/data/restore.ts
+@@ -257,7 +257,7 @@ const restoreElement = (
+             detectLineHeight(element)
+           : // no element height likely means programmatic use, so default
+             // to a fixed line height
+-            getLineHeight(element.fontFamily));
++            getLineHeight(fontFamily));
+       element = restoreElementWithProperties(element, {
+         customData: Fonts.syncLocalFontCustomData(
+           element.customData,
+diff --git a/packages/excalidraw/element/textWysiwyg.tsx b/packages/excalidraw/element/textWysiwyg.tsx
+index a757086..3e32a30 100644
+--- a/packages/excalidraw/element/textWysiwyg.tsx
++++ b/packages/excalidraw/element/textWysiwyg.tsx
+@@ -610,8 +610,8 @@ export const textWysiwyg = ({
+     const target = event?.target;
+ 
+     const isPropertiesTrigger =
+-      target instanceof HTMLElement &&
+-      target.classList.contains("properties-trigger");
++      target instanceof Element &&
++      target.closest(".properties-trigger") !== null;
+ 
+     setTimeout(() => {
+       editable.onblur = handleSubmit;
+@@ -647,8 +647,8 @@ export const textWysiwyg = ({
+     }
+ 
+     const isPropertiesTrigger =
+-      target instanceof HTMLElement &&
+-      target.classList.contains("properties-trigger");
++      target instanceof Element &&
++      target.closest(".properties-trigger") !== null;
+ 
+     if (
+       ((event.target instanceof HTMLElement ||
+@@ -681,10 +681,12 @@ export const textWysiwyg = ({
+   // handle updates of textElement properties of editing element
+   const unbindUpdate = app.scene.onUpdate(() => {
+     updateWysiwygStyle();
+-    const isPopupOpened = !!document.activeElement?.closest(
+-      ".properties-content",
+-    );
+-    if (!isPopupOpened) {
++    const activeElement = document.activeElement;
++    const isPropertiesControl =
++      activeElement instanceof Element &&
++      activeElement.closest(".properties-content, .properties-trigger") !==
++        null;
++    if (!isPropertiesControl) {
+       editable.focus();
+     }
+   });
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index 3a4a3c7..055dfc4 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -41,6 +41,9 @@ import { charWidth } from "../element/textMeasurements";
+ 
+ export const LOCAL_FONT_CUSTOM_DATA_KEY = "siyuanEmbedExcalidrawFont";
+ 
++const DEFAULT_LOCAL_FONT_STORAGE_KEY = "excalidraw:local-fonts:v1";
++const LOCAL_FONT_CACHE_VERSION = 1;
++
+ export type LocalFontDescriptor = {
+   id: number;
+   family: string;
+@@ -56,6 +59,11 @@ export type LocalFontQueryResult = {
+   registeredCount: number;
+ };
+ 
++type PersistedLocalFontCache = {
++  version: typeof LOCAL_FONT_CACHE_VERSION;
++  fonts: LocalFontDescriptor[];
++};
++
+ export class Fonts {
+   // it's ok to track fonts across multiple instances only once, so let's use
+   // a static member to reduce memory footprint
+@@ -73,6 +81,8 @@ export class Fonts {
+ 
+   private static _initialized: boolean = false;
+ 
++  private static localFontsRestored = false;
++
+   private static readonly localFontDescriptors = new Map<
+     number,
+     LocalFontDescriptor
+@@ -95,6 +105,8 @@ export class Fonts {
+ 
+   private static readonly preparedLocalFontIds = new Set<number>();
+ 
++  private static localFontRevision = 0;
++
+   public static get registered() {
+     // lazy load the font registration
+     if (!Fonts._registered) {
+@@ -108,6 +120,8 @@ export class Fonts {
+       ]);
+     }
+ 
++    Fonts.restorePersistedLocalFonts();
++
+     return Fonts._registered;
+   }
+ 
+@@ -418,6 +432,8 @@ export class Fonts {
+       }
+     }
+ 
++    Fonts.persistLocalFonts();
++
+     return {
+       faceCount: fontFaces.length,
+       familyCount: families.size,
+@@ -429,6 +445,14 @@ export class Fonts {
+     return Fonts.localFontDescriptors.get(fontFamily);
+   }
+ 
++  /**
++   * Changes whenever the local-font registry changes. Consumers can use this
++   * value to keep derived lists stable across popup mounts.
++   */
++  public static getLocalFontRevision() {
++    return Fonts.localFontRevision;
++  }
++
+   public static syncLocalFontCustomData(
+     customData: ExcalidrawElement["customData"],
+     fontFamily: number,
+@@ -492,8 +516,7 @@ export class Fonts {
+   }
+ 
+   public static async prepareLocalFont(fontFamily: number) {
+-    const loader = Fonts.localFontLoaders.get(fontFamily);
+-    if (!loader || !Fonts.localFontDescriptors.has(fontFamily)) {
++    if (!Fonts.localFontDescriptors.has(fontFamily)) {
+       return;
+     }
+ 
+@@ -508,6 +531,45 @@ export class Fonts {
+ 
+     const preparation = promiseTry(async () => {
+       try {
++        let loader = Fonts.localFontLoaders.get(fontFamily);
++
++        // Persisted descriptors intentionally contain metadata only. Resolve
++        // the matching face lazily when the user selects that font so startup
++        // stays cheap and the browser can keep its permission prompt scoped to
++        // an actual font use.
++        if (!loader && Fonts.supportsLocalFontAccess()) {
++          const descriptor = Fonts.localFontDescriptors.get(fontFamily);
++          const queryLocalFonts = window.queryLocalFonts;
++          if (descriptor && queryLocalFonts) {
++            const queriedFonts = await queryLocalFonts.call(window, {
++              postscriptNames: [descriptor.postscriptName],
++            });
++            const matches = Array.isArray(queriedFonts) ? queriedFonts : [];
++            const match = matches.find(
++              (fontFace) =>
++                typeof fontFace?.postscriptName === "string" &&
++                fontFace.postscriptName.trim() === descriptor.postscriptName,
++            );
++
++            if (match && typeof match.blob === "function") {
++              Fonts.registerLocalFontDescriptor(
++                {
++                  ...descriptor,
++                  family: match.family?.trim() || descriptor.family,
++                  fullName: match.fullName?.trim() || descriptor.fullName,
++                  style: match.style?.trim() || descriptor.style,
++                },
++                () => match.blob(),
++              );
++              loader = Fonts.localFontLoaders.get(fontFamily);
++            }
++          }
++        }
++
++        if (!loader) {
++          return;
++        }
++
+         const blob = await loader();
+         const metrics = Fonts.parseOpenTypeMetrics(await blob.arrayBuffer());
+         if (!metrics) {
+@@ -527,6 +589,7 @@ export class Fonts {
+           metrics,
+         };
+         Fonts.preparedLocalFontIds.add(fontFamily);
++        Fonts.persistLocalFonts();
+       } catch (error) {
+         console.warn("Failed to read local font metrics", error);
+       }
+@@ -551,21 +614,37 @@ export class Fonts {
+       normalizedInput.postscriptName,
+     );
+     if (knownId) {
+-      if (loader) {
+-        Fonts.localFontLoaders.set(knownId, loader);
+-        return Fonts.localFontDescriptors.get(knownId)!;
+-      }
++      const existingDescriptor = Fonts.localFontDescriptors.get(knownId);
++      const descriptor = {
++        ...(loader && existingDescriptor
++          ? existingDescriptor
++          : normalizedInput),
++        ...normalizedInput,
++        id: knownId,
++        // Enumeration supplies fallback metrics. Preserve metrics parsed from
++        // a previous load until the new face is prepared again.
++        metrics:
++          loader && existingDescriptor
++            ? { ...existingDescriptor.metrics }
++            : { ...normalizedInput.metrics },
++      };
+ 
+-      const descriptor = { ...normalizedInput, id: knownId };
+       registerLocalFontFamilyName(knownId, descriptor.family);
+       Fonts.localFontDescriptors.set(knownId, descriptor);
+ 
+-      const registered = Fonts.registered.get(knownId);
+-      if (registered) {
+-        registered.metadata = {
+-          ...registered.metadata,
+-          metrics: { ...descriptor.metrics },
+-        };
++      if (loader) {
++        Fonts.localFontLoaders.set(knownId, loader);
++        Fonts.preparedLocalFontIds.delete(knownId);
++        Fonts.localFontRevision++;
++      } else {
++        const registered = Fonts.registered.get(knownId);
++        if (registered) {
++          registered.metadata = {
++            ...registered.metadata,
++            metrics: { ...descriptor.metrics },
++          };
++        }
++        Fonts.localFontRevision++;
+       }
+ 
+       return descriptor;
+@@ -609,6 +688,7 @@ export class Fonts {
+         new ExcalidrawFontFace(descriptor.family, LOCAL_FONT_PROTOCOL),
+       ],
+     });
++    Fonts.localFontRevision++;
+     return descriptor;
+   }
+ 
+@@ -639,6 +719,91 @@ export class Fonts {
+     return { ...FONT_METADATA[FONT_FAMILY.Helvetica].metrics };
+   }
+ 
++  private static getLocalFontStorageKey() {
++    const configuredKey =
++      typeof window !== "undefined"
++        ? window.EXCALIDRAW_LOCAL_FONT_STORAGE_KEY
++        : undefined;
++
++    return configuredKey?.trim() || DEFAULT_LOCAL_FONT_STORAGE_KEY;
++  }
++
++  private static restorePersistedLocalFonts() {
++    if (Fonts.localFontsRestored) {
++      return;
++    }
++
++    // Set the guard before reading storage because registration consults the
++    // public registry and can re-enter this getter.
++    Fonts.localFontsRestored = true;
++
++    if (typeof window === "undefined") {
++      return;
++    }
++
++    try {
++      const storedValue = window.localStorage.getItem(
++        Fonts.getLocalFontStorageKey(),
++      );
++      if (!storedValue) {
++        return;
++      }
++
++      const parsed = JSON.parse(
++        storedValue,
++      ) as Partial<PersistedLocalFontCache>;
++      if (
++        !parsed ||
++        parsed.version !== LOCAL_FONT_CACHE_VERSION ||
++        !Array.isArray(parsed.fonts)
++      ) {
++        return;
++      }
++
++      for (const value of parsed.fonts.slice(0, 1000)) {
++        const descriptor = Fonts.normalizeLocalFontDescriptor(value);
++        if (!descriptor) {
++          continue;
++        }
++
++        try {
++          Fonts.registerLocalFontDescriptor(descriptor);
++        } catch (error) {
++          console.warn("Failed to restore a persisted local font", error);
++        }
++      }
++    } catch (error) {
++      console.warn("Failed to restore persisted local fonts", error);
++    }
++  }
++
++  private static persistLocalFonts() {
++    if (typeof window === "undefined") {
++      return;
++    }
++
++    try {
++      const fonts = Array.from(Fonts.localFontDescriptors.values())
++        .sort((left, right) => left.family.localeCompare(right.family))
++        .slice(0, 1000)
++        .map((descriptor) => ({
++          ...descriptor,
++          metrics: { ...descriptor.metrics },
++        }));
++      const cache: PersistedLocalFontCache = {
++        version: LOCAL_FONT_CACHE_VERSION,
++        fonts,
++      };
++
++      window.localStorage.setItem(
++        Fonts.getLocalFontStorageKey(),
++        JSON.stringify(cache),
++      );
++    } catch (error) {
++      console.warn("Failed to persist local fonts", error);
++    }
++  }
++
+   private static normalizeLocalFontDescriptor(
+     value: unknown,
+   ): LocalFontDescriptor | null {
+diff --git a/packages/excalidraw/global.d.ts b/packages/excalidraw/global.d.ts
+index 8f2864b..b51d638 100644
+--- a/packages/excalidraw/global.d.ts
++++ b/packages/excalidraw/global.d.ts
+@@ -3,6 +3,7 @@ interface Window {
+   __EXCALIDRAW_SHA__: string | undefined;
+   EXCALIDRAW_ASSET_PATH: string | string[] | undefined;
+   EXCALIDRAW_EXPORT_SOURCE: string;
++  EXCALIDRAW_LOCAL_FONT_STORAGE_KEY?: string;
+   EXCALIDRAW_THROTTLE_RENDER: boolean | undefined;
+   DEBUG_FRACTIONAL_INDICES: boolean | undefined;
+   gtag: Function;
+diff --git a/packages/excalidraw/index.tsx b/packages/excalidraw/index.tsx
+index b4b8574..8c31fdd 100644
+--- a/packages/excalidraw/index.tsx
++++ b/packages/excalidraw/index.tsx
+@@ -247,6 +247,7 @@ export { isLinearElement } from "./element/typeChecks";
+ 
+ export {
+   FONT_FAMILY,
++  MIN_FONT_SIZE,
+   THEME,
+   MIME_TYPES,
+   ROUNDNESS,
+@@ -298,3 +299,9 @@ export { getDataURL } from "./data/blob";
+ export { isElementLink } from "./element/elementLink";
+ 
+ export { setCustomTextMetricsProvider } from "./element/textMeasurements";
++
++export {
++  Fonts,
++  LOCAL_FONT_CUSTOM_DATA_KEY,
++  type LocalFontDescriptor,
++} from "./fonts";
+diff --git a/packages/excalidraw/locales/en.json b/packages/excalidraw/locales/en.json
+index 7751070..0b3668d 100644
+--- a/packages/excalidraw/locales/en.json
++++ b/packages/excalidraw/locales/en.json
+@@ -606,8 +606,8 @@
+     "empty": "No fonts found",
+     "builtInFonts": "Excalidraw fonts ({{count}})",
+     "localFonts": "Local fonts ({{count}})",
+-    "loadLocalFonts": "Load local fonts",
+-    "loadingLocalFonts": "Reading local fonts...",
++    "loadLocalFonts": "Update local font list",
++    "loadingLocalFonts": "Updating local font list...",
+     "localFontsReady": "{{count}} local font families loaded",
+     "localFontsError": "Local fonts could not be read",
+     "localFontsUnsupported": "Local font access is unavailable"
+diff --git a/packages/excalidraw/locales/zh-CN.json b/packages/excalidraw/locales/zh-CN.json
+index cd8ad2e..64f9e5d 100644
+--- a/packages/excalidraw/locales/zh-CN.json
++++ b/packages/excalidraw/locales/zh-CN.json
+@@ -531,8 +531,8 @@
+     "empty": "未找到字体",
+     "builtInFonts": "Excalidraw 内置字体（{{count}}）",
+     "localFonts": "本机字体（{{count}}）",
+-    "loadLocalFonts": "读取本机字体",
+-    "loadingLocalFonts": "正在读取本机字体...",
++    "loadLocalFonts": "更新本机字体列表",
++    "loadingLocalFonts": "正在更新本机字体列表...",
+     "localFontsReady": "已载入 {{count}} 个本机字体家族",
+     "localFontsError": "读取本机字体失败",
+     "localFontsUnsupported": "当前环境不支持本机字体读取"
+diff --git a/packages/excalidraw/scene/Shape.ts b/packages/excalidraw/scene/Shape.ts
+index 9c49db0..9b2e2b9 100644
+--- a/packages/excalidraw/scene/Shape.ts
++++ b/packages/excalidraw/scene/Shape.ts
+@@ -508,7 +508,7 @@ export const _generateElementShape = (
+ 
+       if (isPathALoop(element.points)) {
+         // generate rough polygon to fill freedraw shape
+-        const simplifiedPoints = simplify(element.points, 0.75);
++        const simplifiedPoints = simplify([...element.points], 0.75);
+         shape = generator.curve(simplifiedPoints as [number, number][], {
+           ...generateRoughOptions(element),
+           stroke: "none",
+diff --git a/packages/excalidraw/tests/appState.test.tsx b/packages/excalidraw/tests/appState.test.tsx
+index 4a937cd..7e6a636 100644
+--- a/packages/excalidraw/tests/appState.test.tsx
++++ b/packages/excalidraw/tests/appState.test.tsx
+@@ -4,7 +4,8 @@ import { Excalidraw } from "../index";
+ import { API } from "./helpers/api";
+ import { getDefaultAppState } from "../appState";
+ import { EXPORT_DATA_TYPES, MIME_TYPES } from "../constants";
+-import { Pointer, UI } from "./helpers/ui";
++import { Keyboard, Pointer, UI } from "./helpers/ui";
++import { KEYS } from "../keys";
+ import type { ExcalidrawTextElement } from "../element/types";
+ 
+ const { h } = window;
+@@ -78,4 +79,92 @@ describe("appState", () => {
+ 
+     expect((h.elements[0] as ExcalidrawTextElement).fontSize).toBe(16);
+   });
++
++  it("sets an exact font size with text tool selected", async () => {
++    const { container } = await render(<Excalidraw />);
++
++    UI.clickTool("text");
++
++    const input = queryByTestId(container, "font-size-input")!;
++    fireEvent.change(input, { target: { value: "27" } });
++    expect(h.state.currentItemFontSize).toBe(27);
++    fireEvent.keyDown(input, { key: "Enter" });
++
++    expect(h.state.currentItemFontSize).toBe(27);
++
++    const mouse = new Pointer("mouse");
++    mouse.clickAt(100, 100);
++
++    expect((h.elements[0] as ExcalidrawTextElement).fontSize).toBe(27);
++  });
++
++  it("keeps a concrete decimal font size while editing", async () => {
++    const { container } = await render(<Excalidraw />);
++
++    UI.clickTool("text");
++
++    const input = queryByTestId(container, "font-size-input")!;
++    fireEvent.change(input, { target: { value: "27.5" } });
++
++    expect(h.state.currentItemFontSize).toBe(27.5);
++    fireEvent.keyDown(input, { key: "Enter" });
++    expect(input).toHaveValue("27.5");
++  });
++
++  it("preserves an intermediate decimal while typing a font size", async () => {
++    const { container } = await render(<Excalidraw />);
++
++    UI.clickTool("text");
++
++    const input = queryByTestId(container, "font-size-input")!;
++    input.focus();
++    fireEvent.change(input, { target: { value: "27." } });
++    expect(input).toHaveValue("27.");
++    expect(h.state.currentItemFontSize).toBe(27);
++
++    fireEvent.change(input, { target: { value: "27.5" } });
++    expect(input).toHaveValue("27.5");
++    expect(h.state.currentItemFontSize).toBe(27.5);
++  });
++
++  it("clamps an exact font size to the supported minimum", async () => {
++    const { container } = await render(<Excalidraw />);
++
++    UI.clickTool("text");
++
++    const input = queryByTestId(container, "font-size-input")!;
++    fireEvent.change(input, { target: { value: "0" } });
++    fireEvent.blur(input);
++
++    expect(h.state.currentItemFontSize).toBe(1);
++    expect(input).toHaveValue("1");
++  });
++
++  it("updates the selected text size while editing", async () => {
++    await render(<Excalidraw />);
++
++    const text = API.createElement({
++      type: "text",
++      text: "live size",
++      x: 100,
++      y: 100,
++      width: 80,
++      height: 25,
++    });
++    API.setElements([text]);
++    API.setSelectedElements([text]);
++    Keyboard.keyPress(KEYS.ENTER);
++
++    const input = queryByTestId(
++      document.body,
++      "font-size-input",
++    ) as HTMLInputElement;
++    expect(input).not.toBeNull();
++
++    input.focus();
++    fireEvent.change(input, { target: { value: "31" } });
++
++    expect(API.getElement(text).fontSize).toBe(31);
++    expect(document.activeElement).toBe(input);
++  });
+ });
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+index 85dd07d..f6fb7ac 100644
+--- a/packages/excalidraw/tests/localFonts.test.ts
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -11,6 +11,8 @@ import {
+ import { getFontFamilyString } from "../utils";
+ import { API } from "./helpers/api";
+ 
++const LOCAL_FONT_STORAGE_TEST_KEY = "excalidraw-local-fonts-test:v1";
++
+ const createFontData = (
+   family: string,
+   postscriptName: string,
+@@ -51,10 +53,13 @@ const createMetricsFontBuffer = () => {
+ 
+ afterEach(() => {
+   Reflect.deleteProperty(window, "queryLocalFonts");
++  window.localStorage.removeItem(LOCAL_FONT_STORAGE_TEST_KEY);
++  Reflect.deleteProperty(window, "EXCALIDRAW_LOCAL_FONT_STORAGE_KEY");
+ });
+ 
+ describe("local fonts", () => {
+   it("enumerates families, reads metrics and persists the descriptor", async () => {
++    window.EXCALIDRAW_LOCAL_FONT_STORAGE_KEY = LOCAL_FONT_STORAGE_TEST_KEY;
+     const metricsBuffer = createMetricsFontBuffer();
+     const sansFamily = "PLUS Local Sans Test";
+     const serifFamily = "PLUS Local Serif Test";
+@@ -99,6 +104,25 @@ describe("local fonts", () => {
+       descender: -500,
+       lineHeight: 1.221,
+     });
++
++    const persistedCache = JSON.parse(
++      window.localStorage.getItem(LOCAL_FONT_STORAGE_TEST_KEY)!,
++    );
++    expect(persistedCache.version).toBe(1);
++    expect(persistedCache.fonts).toEqual(
++      expect.arrayContaining([
++        expect.objectContaining({
++          family: sansFamily,
++          postscriptName: "PLUSLocalSans-Regular",
++          metrics: {
++            unitsPerEm: 2048,
++            ascender: 1900,
++            descender: -500,
++            lineHeight: 1.221,
++          },
++        }),
++      ]),
++    );
+     expect(getFontFamilyString({ fontFamily: fontFamily! })).toContain(
+       JSON.stringify(sansFamily),
+     );
+@@ -204,4 +228,47 @@ describe("local fonts", () => {
+       restoredElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
+     ).toMatchObject({ metrics: persistedMetrics });
+   });
++
++  it("reacquires a persisted font face by postscript name on first use", async () => {
++    window.EXCALIDRAW_LOCAL_FONT_STORAGE_KEY = LOCAL_FONT_STORAGE_TEST_KEY;
++    const family = "PLUS Reacquired Local Font Test";
++    const postscriptName = "PLUSReacquiredLocalFontTest-Regular";
++    const fontFace = createFontData(
++      family,
++      postscriptName,
++      "Regular",
++      createMetricsFontBuffer(),
++    );
++
++    window.queryLocalFonts = vi.fn(async () => [fontFace]);
++    await Fonts.queryAndRegisterLocalFonts();
++    const fontFamily = Array.from(Fonts.registered.keys()).find(
++      (candidate) =>
++        Fonts.getLocalFontDescriptor(candidate)?.postscriptName ===
++        postscriptName,
++    )!;
++
++    const internals = Fonts as any;
++    internals.localFontLoaders.clear();
++    internals.preparedLocalFontIds.clear();
++    (fontFace.blob as any).mockClear();
++    const targetedQuery = vi.fn(
++      async (options?: { postscriptNames?: string[] }) => {
++        expect(options).toEqual({ postscriptNames: [postscriptName] });
++        return [fontFace];
++      },
++    );
++    window.queryLocalFonts = targetedQuery;
++
++    await Fonts.prepareLocalFont(fontFamily);
++
++    expect(targetedQuery).toHaveBeenCalledTimes(1);
++    expect(fontFace.blob).toHaveBeenCalledTimes(1);
++    expect(Fonts.getLocalFontDescriptor(fontFamily)?.metrics).toEqual({
++      unitsPerEm: 2048,
++      ascender: 1900,
++      descender: -500,
++      lineHeight: 1.221,
++    });
++  });
+ });

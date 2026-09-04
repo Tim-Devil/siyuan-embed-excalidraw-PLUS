@@ -1,0 +1,146 @@
+From 0f191b8b9cd774bf1a8e5f9ff9e5d56edc11b0ff Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 21:09:32 +0800
+Subject: [PATCH] fix(fonts): apply local metrics after immediate selection
+
+
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index 7bbed1d..47981e5 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -246,12 +246,33 @@ export const FontPickerList = React.memo(
+     }, []);
+ 
+     const selectFont = useCallback(
+-      async (fontFamily: number) => {
++      (fontFamily: number) => {
+         const requestId = ++selectionRequestRef.current;
+-        await Fonts.prepareLocalFont(fontFamily);
+-        if (mountedRef.current && requestId === selectionRequestRef.current) {
+-          onSelect(fontFamily);
++        const isLocalFont = Fonts.getLocalFontDescriptor(fontFamily) !== undefined;
++
++        // Commit the visible selection synchronously so the popover stays
++        // responsive while Local Font Access reads the selected face.
++        onSelect(fontFamily);
++
++        if (!isLocalFont) {
++          return;
+         }
++
++        void Fonts.prepareLocalFont(fontFamily)
++          .then((metricsChanged) => {
++            if (
++              metricsChanged &&
++              mountedRef.current &&
++              requestId === selectionRequestRef.current
++            ) {
++              // Reapply the current family after metrics are known so text
++              // bounds and line height use the actual local font.
++              onSelect(fontFamily);
++            }
++          })
++          .catch((error) => {
++            console.warn("Failed to prepare the selected local font", error);
++          });
+       },
+       [onSelect],
+     );
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index 055dfc4..d41645d 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -100,7 +100,7 @@ export class Fonts {
+ 
+   private static readonly localFontPreparation = new Map<
+     number,
+-    Promise<void>
++    Promise<boolean>
+   >();
+ 
+   private static readonly preparedLocalFontIds = new Set<number>();
+@@ -515,13 +515,13 @@ export class Fonts {
+       : fallbackFontFamily;
+   }
+ 
+-  public static async prepareLocalFont(fontFamily: number) {
++  public static async prepareLocalFont(fontFamily: number): Promise<boolean> {
+     if (!Fonts.localFontDescriptors.has(fontFamily)) {
+-      return;
++      return false;
+     }
+ 
+     if (Fonts.preparedLocalFontIds.has(fontFamily)) {
+-      return;
++      return false;
+     }
+ 
+     const pending = Fonts.localFontPreparation.get(fontFamily);
+@@ -529,7 +529,7 @@ export class Fonts {
+       return pending;
+     }
+ 
+-    const preparation = promiseTry(async () => {
++    const preparation = promiseTry(async (): Promise<boolean> => {
+       try {
+         let loader = Fonts.localFontLoaders.get(fontFamily);
+ 
+@@ -567,21 +567,26 @@ export class Fonts {
+         }
+ 
+         if (!loader) {
+-          return;
++          return false;
+         }
+ 
+         const blob = await loader();
+         const metrics = Fonts.parseOpenTypeMetrics(await blob.arrayBuffer());
+         if (!metrics) {
+-          return;
++          return false;
+         }
+ 
+         const descriptor = Fonts.localFontDescriptors.get(fontFamily);
+         const registered = Fonts.registered.get(fontFamily);
+         if (!descriptor || !registered) {
+-          return;
++          return false;
+         }
+ 
++        const metricsChanged =
++          descriptor.metrics.unitsPerEm !== metrics.unitsPerEm ||
++          descriptor.metrics.ascender !== metrics.ascender ||
++          descriptor.metrics.descender !== metrics.descender ||
++          descriptor.metrics.lineHeight !== metrics.lineHeight;
+         const nextDescriptor = { ...descriptor, metrics };
+         Fonts.localFontDescriptors.set(fontFamily, nextDescriptor);
+         registered.metadata = {
+@@ -590,8 +595,10 @@ export class Fonts {
+         };
+         Fonts.preparedLocalFontIds.add(fontFamily);
+         Fonts.persistLocalFonts();
++        return metricsChanged;
+       } catch (error) {
+         console.warn("Failed to read local font metrics", error);
++        return false;
+       }
+     }).finally(() => {
+       Fonts.localFontPreparation.delete(fontFamily);
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+index f6fb7ac..60f1bf1 100644
+--- a/packages/excalidraw/tests/localFonts.test.ts
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -95,8 +95,8 @@ describe("local fonts", () => {
+     )?.[0];
+     expect(fontFamily).toBeGreaterThanOrEqual(LOCAL_FONT_ID_START);
+ 
+-    await Fonts.prepareLocalFont(fontFamily!);
+-    await Fonts.prepareLocalFont(fontFamily!);
++    expect(await Fonts.prepareLocalFont(fontFamily!)).toBe(true);
++    expect(await Fonts.prepareLocalFont(fontFamily!)).toBe(false);
+     expect(sansRegular.blob).toHaveBeenCalledTimes(1);
+     expect(Fonts.getLocalFontDescriptor(fontFamily!)?.metrics).toEqual({
+       unitsPerEm: 2048,
+-- 
+2.53.0
+

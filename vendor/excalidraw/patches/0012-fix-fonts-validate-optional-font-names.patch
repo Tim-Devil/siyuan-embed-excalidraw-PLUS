@@ -1,0 +1,66 @@
+From 30abd1d1c5704b6b5c6784bd3a7c097ad0f23ad3 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Sat, 5 Sep 2026 03:21:19 +0800
+Subject: [PATCH] fix(fonts): validate optional local font names
+
+---
+ packages/excalidraw/fonts/Fonts.ts           | 10 +++++++++-
+ packages/excalidraw/tests/localFonts.test.ts |  3 ++-
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index 93bc11c..03e6959 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -402,6 +402,8 @@ export class Fonts {
+         !fontFace.family.trim() ||
+         typeof fontFace.postscriptName !== "string" ||
+         !fontFace.postscriptName.trim() ||
++        (fontFace.fullName !== undefined &&
++          typeof fontFace.fullName !== "string") ||
+         (fontFace.style !== undefined &&
+           typeof fontFace.style !== "string") ||
+         typeof fontFace.blob !== "function"
+@@ -439,7 +441,11 @@ export class Fonts {
+         {
+           id: Fonts.allocateLocalFontId(preferredFace.postscriptName),
+           family,
+-          fullName: preferredFace.fullName?.trim() || family,
++          fullName:
++            typeof preferredFace.fullName === "string" &&
++            preferredFace.fullName.trim()
++              ? preferredFace.fullName.trim()
++              : family,
+           postscriptName: preferredFace.postscriptName.trim(),
+           style: preferredFace.style?.trim() || "Regular",
+           metrics: Fonts.getDefaultLocalFontMetrics(),
+@@ -570,6 +576,8 @@ export class Fonts {
+                 typeof fontFace?.postscriptName === "string" &&
+                 fontFace.postscriptName.trim() === descriptor.postscriptName &&
+                 typeof fontFace.family === "string" &&
++                (fontFace.fullName === undefined ||
++                  typeof fontFace.fullName === "string") &&
+                 (fontFace.style === undefined ||
+                   typeof fontFace.style === "string") &&
+                 typeof fontFace.blob === "function",
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+index 99bd13e..772018f 100644
+--- a/packages/excalidraw/tests/localFonts.test.ts
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -80,11 +80,12 @@ describe("local fonts", () => {
+       { family: "PLUS Invalid", postscriptName: null, blob: vi.fn() },
+       { family: "PLUS Invalid", postscriptName: "InvalidBlob", blob: null },
+       { family: "PLUS Invalid", postscriptName: "InvalidStyle", style: 42, blob: vi.fn() },
++      { family: "PLUS Invalid", postscriptName: "InvalidFullName", fullName: 42, blob: vi.fn() },
+       validFace,
+     ] as any);
+ 
+     await expect(Fonts.queryAndRegisterLocalFonts()).resolves.toMatchObject({
+-      faceCount: 5,
++      faceCount: 6,
+       familyCount: 1,
+       registeredCount: 1,
+     });
+-- 
+2.53.0
+

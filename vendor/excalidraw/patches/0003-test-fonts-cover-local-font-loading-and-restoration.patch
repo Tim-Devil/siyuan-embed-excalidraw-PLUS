@@ -1,7 +1,7 @@
 From a9707fc3011fd62ba738f3ef918756c40323629a Mon Sep 17 00:00:00 2001
 From: Mayrain <3220104149@zju.edu.cn>
 Date: Tue, 1 Sep 2026 21:55:29 +0800
-Subject: [PATCH 3/3] test(fonts): cover local font loading and restoration
+Subject: [PATCH 3/4] test(fonts): cover local font loading and restoration
 
 ---
  packages/excalidraw/tests/localFonts.test.ts | 207 +++++++++++++++++++
@@ -72,21 +72,21 @@ index 0000000..85dd07d
 +describe("local fonts", () => {
 +  it("enumerates families, reads metrics and persists the descriptor", async () => {
 +    const metricsBuffer = createMetricsFontBuffer();
-+    const sansFamily = "QYL Local Sans Test";
-+    const serifFamily = "QYL Local Serif Test";
++    const sansFamily = "PLUS Local Sans Test";
++    const serifFamily = "PLUS Local Serif Test";
 +    const sansRegular = createFontData(
 +      sansFamily,
-+      "QYLLocalSans-Regular",
++      "PLUSLocalSans-Regular",
 +      "Regular",
 +      metricsBuffer,
 +    );
 +
 +    window.queryLocalFonts = vi.fn(async () => [
 +      sansRegular,
-+      createFontData(sansFamily, "QYLLocalSans-Bold", "Bold", metricsBuffer),
++      createFontData(sansFamily, "PLUSLocalSans-Bold", "Bold", metricsBuffer),
 +      createFontData(
 +        serifFamily,
-+        "QYLLocalSerif-Regular",
++        "PLUSLocalSerif-Regular",
 +        "Regular",
 +        metricsBuffer,
 +      ),
@@ -127,16 +127,16 @@ index 0000000..85dd07d
 +    expect(textElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY]).toMatchObject({
 +      id: fontFamily,
 +      family: sansFamily,
-+      postscriptName: "QYLLocalSans-Regular",
++      postscriptName: "PLUSLocalSans-Regular",
 +    });
 +  });
 +
 +  it("restores a persisted descriptor and remaps an occupied font id", () => {
 +    const descriptor: LocalFontDescriptor = {
 +      id: FONT_FAMILY.Nunito,
-+      family: "QYL Persisted Local Font Test",
-+      fullName: "QYL Persisted Local Font Test Regular",
-+      postscriptName: "QYLPersistedLocalFontTest-Regular",
++      family: "PLUS Persisted Local Font Test",
++      fullName: "PLUS Persisted Local Font Test Regular",
++      postscriptName: "PLUSPersistedLocalFontTest-Regular",
 +      style: "Regular",
 +      metrics: {
 +        unitsPerEm: 1000,
@@ -175,8 +175,8 @@ index 0000000..85dd07d
 +  });
 +
 +  it("keeps persisted metrics when the same font was enumerated first", async () => {
-+    const family = "QYL Restored Metrics Test";
-+    const postscriptName = "QYLRestoredMetricsTest-Regular";
++    const family = "PLUS Restored Metrics Test";
++    const postscriptName = "PLUSRestoredMetricsTest-Regular";
 +    window.queryLocalFonts = vi.fn(async () => [
 +      createFontData(
 +        family,
@@ -221,6 +221,3 @@ index 0000000..85dd07d
 +    ).toMatchObject({ metrics: persistedMetrics });
 +  });
 +});
--- 
-2.53.0
-

@@ -2,7 +2,7 @@
   "name": "siyuan-embed-excalidraw-plus",
   "author": "Yuxin Zhao, Tim-Devil",
   "url": "https://github.com/Tim-Devil/siyuan-embed-excalidraw-PLUS",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "minAppVersion": "3.0.0",
   "disabledInPublish": true,
   "backends": [

@@ -1,0 +1,60 @@
+From 495879aa94599a1474c90fb3c7a284f8de8d1488 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 20:09:49 +0800
+Subject: [PATCH] fix(fonts): close async edge cases
+
+---
+ packages/excalidraw/actions/actionProperties.tsx            | 2 ++
+ .../excalidraw/components/FontPicker/FontPickerList.tsx     | 6 +++++-
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/packages/excalidraw/actions/actionProperties.tsx b/packages/excalidraw/actions/actionProperties.tsx
+index 74bb8ac..acb6c17 100644
+--- a/packages/excalidraw/actions/actionProperties.tsx
++++ b/packages/excalidraw/actions/actionProperties.tsx
+@@ -1071,6 +1071,8 @@ export const actionChangeFontFamily = register({
+ 
+           // trigger update once we've mutated all the elements, which also updates our cache
+           app.fonts.onLoaded(fontFaces);
++        }).catch((error) => {
++          console.warn("Failed to load the selected font", error);
+         });
+       }
+     }
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index 0cdf7ea..7bbed1d 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -162,6 +162,7 @@ export const FontPickerList = React.memo(
+     const inputRef = useRef<HTMLInputElement>(null);
+     const mountedRef = useRef(true);
+     const selectionRequestRef = useRef(0);
++    const localFontQueryInFlightRef = useRef(false);
+     const debouncedSetSearchTerm = useMemo(
+       () => debounce((term: string) => setSearchTerm(term), 20),
+       [],
+@@ -217,10 +218,11 @@ export const FontPickerList = React.memo(
+     }, []);
+ 
+     const loadLocalFonts = useCallback(async () => {
+-      if (!mountedRef.current) {
++      if (!mountedRef.current || localFontQueryInFlightRef.current) {
+         return;
+       }
+ 
++      localFontQueryInFlightRef.current = true;
+       setLocalFontStatus({ type: "loading" });
+ 
+       try {
+@@ -238,6 +240,8 @@ export const FontPickerList = React.memo(
+         if (mountedRef.current) {
+           setLocalFontStatus({ type: "error" });
+         }
++      } finally {
++        localFontQueryInFlightRef.current = false;
+       }
+     }, []);
+ 
+-- 
+2.53.0
+

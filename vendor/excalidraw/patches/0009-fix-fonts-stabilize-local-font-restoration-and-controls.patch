@@ -1,0 +1,230 @@
+From 85cdacd7e800a00544287052fe062b44d34222a9 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 23:35:42 +0800
+Subject: [PATCH] fix(fonts): stabilize local font restoration and controls
+
+---
+ .../excalidraw/actions/actionProperties.tsx   |  2 +-
+ .../components/FontPicker/FontPickerList.tsx  | 26 +++++-
+ packages/excalidraw/fonts/Fonts.ts            | 32 ++++++-
+ packages/excalidraw/tests/localFonts.test.ts  | 88 +++++++++++++++++++
+ 4 files changed, 144 insertions(+), 4 deletions(-)
+
+diff --git a/packages/excalidraw/actions/actionProperties.tsx b/packages/excalidraw/actions/actionProperties.tsx
+index acb6c17..0e12eaf 100644
+--- a/packages/excalidraw/actions/actionProperties.tsx
++++ b/packages/excalidraw/actions/actionProperties.tsx
+@@ -328,7 +328,7 @@ const changeFontSize = (
+     appState,
+     (oldElement) => {
+       if (isTextElement(oldElement)) {
+-        const newFontSize = getNewFontSize(oldElement);
++        const newFontSize = Math.max(MIN_FONT_SIZE, getNewFontSize(oldElement));
+         newFontSizes.add(newFontSize);
+ 
+         let newElement: ExcalidrawTextElement = newElementWith(oldElement, {
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index 47981e5..7f2c0bf 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -333,6 +333,23 @@ export const FontPickerList = React.memo(
+         return;
+       }
+ 
++      const selectedIsVisible =
++        selectedFontFamily !== null &&
++        filteredFonts.some((font) => font.value === selectedFontFamily);
++      if (selectedIsVisible) {
++        if (hoveredFontFamily !== null) {
++          onLeave();
++        }
++        return;
++      }
++
++      if (
++        hoveredFontFamily !== null &&
++        filteredFonts.some((font) => font.value === hoveredFontFamily)
++      ) {
++        return;
++      }
++
+       const firstFont = filteredFonts[0];
+       if (firstFont) {
+         if (hoveredFontFamily !== firstFont.value) {
+@@ -341,7 +358,14 @@ export const FontPickerList = React.memo(
+       } else if (hoveredFontFamily !== null) {
+         onLeave();
+       }
+-    }, [searchTerm, filteredFonts, hoveredFontFamily, onHover, onLeave]);
++    }, [
++      searchTerm,
++      filteredFonts,
++      selectedFontFamily,
++      hoveredFontFamily,
++      onHover,
++      onLeave,
++    ]);
+ 
+     const onKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
+       (event) => {
+diff --git a/packages/excalidraw/fonts/Fonts.ts b/packages/excalidraw/fonts/Fonts.ts
+index d41645d..97b473a 100644
+--- a/packages/excalidraw/fonts/Fonts.ts
++++ b/packages/excalidraw/fonts/Fonts.ts
+@@ -59,6 +59,19 @@ export type LocalFontQueryResult = {
+   registeredCount: number;
+ };
+ 
++const areLocalFontDescriptorsEqual = (
++  left: LocalFontDescriptor,
++  right: LocalFontDescriptor,
++) => left.id === right.id
++  && left.family === right.family
++  && left.fullName === right.fullName
++  && left.postscriptName === right.postscriptName
++  && left.style === right.style
++  && left.metrics.unitsPerEm === right.metrics.unitsPerEm
++  && left.metrics.ascender === right.metrics.ascender
++  && left.metrics.descender === right.metrics.descender
++  && left.metrics.lineHeight === right.metrics.lineHeight;
++
+ type PersistedLocalFontCache = {
+   version: typeof LOCAL_FONT_CACHE_VERSION;
+   fonts: LocalFontDescriptor[];
+@@ -622,6 +635,8 @@ export class Fonts {
+     );
+     if (knownId) {
+       const existingDescriptor = Fonts.localFontDescriptors.get(knownId);
++      const preserveExistingMetrics = Boolean(existingDescriptor) &&
++        (Boolean(loader) || Fonts.preparedLocalFontIds.has(knownId));
+       const descriptor = {
+         ...(loader && existingDescriptor
+           ? existingDescriptor
+@@ -629,13 +644,26 @@ export class Fonts {
+         ...normalizedInput,
+         id: knownId,
+         // Enumeration supplies fallback metrics. Preserve metrics parsed from
+-        // a previous load until the new face is prepared again.
++        // a previous load until the new face is prepared again. A descriptor
++        // restored from scene data must also keep metrics already parsed in
++        // this runtime.
+         metrics:
+-          loader && existingDescriptor
++          preserveExistingMetrics && existingDescriptor
+             ? { ...existingDescriptor.metrics }
+             : { ...normalizedInput.metrics },
+       };
+ 
++      // Restoring every text element can reach this path repeatedly. Keep the
++      // registry revision stable when the descriptor already has the same
++      // effective data; a real loader registration still refreshes the face.
++      if (
++        !loader &&
++        existingDescriptor &&
++        areLocalFontDescriptorsEqual(existingDescriptor, descriptor)
++      ) {
++        return existingDescriptor;
++      }
++
+       registerLocalFontFamilyName(knownId, descriptor.family);
+       Fonts.localFontDescriptors.set(knownId, descriptor);
+ 
+diff --git a/packages/excalidraw/tests/localFonts.test.ts b/packages/excalidraw/tests/localFonts.test.ts
+index 60f1bf1..a249389 100644
+--- a/packages/excalidraw/tests/localFonts.test.ts
++++ b/packages/excalidraw/tests/localFonts.test.ts
+@@ -229,6 +229,94 @@ describe("local fonts", () => {
+     ).toMatchObject({ metrics: persistedMetrics });
+   });
+ 
++  it("keeps prepared metrics when scene data contains an older descriptor", async () => {
++    const family = "Prepared Metrics Test";
++    const postscriptName = "PreparedMetricsTest-Regular";
++    const fontFace = createFontData(
++      family,
++      postscriptName,
++      "Regular",
++      createMetricsFontBuffer(),
++    );
++
++    window.queryLocalFonts = vi.fn(async () => [fontFace]);
++    await Fonts.queryAndRegisterLocalFonts();
++    const fontFamily = Array.from(Fonts.registered.keys()).find(
++      (candidate) =>
++        Fonts.getLocalFontDescriptor(candidate)?.postscriptName ===
++        postscriptName,
++    )!;
++    await Fonts.prepareLocalFont(fontFamily);
++
++    const staleMetrics = {
++      unitsPerEm: 1000,
++      ascender: 700,
++      descender: -200,
++      lineHeight: 1.05,
++    };
++    const sourceElement = {
++      ...API.createElement({ type: "text", text: "prepared metrics" }),
++      fontFamily,
++      customData: {
++        [LOCAL_FONT_CUSTOM_DATA_KEY]: {
++          ...Fonts.getLocalFontDescriptor(fontFamily)!,
++          metrics: staleMetrics,
++        },
++      },
++    } as ExcalidrawTextElement;
++
++    const restoredElement = restoreElements([sourceElement], null)[0] as
++      ExcalidrawTextElement;
++    const expectedMetrics = {
++      unitsPerEm: 2048,
++      ascender: 1900,
++      descender: -500,
++      lineHeight: 1.221,
++    };
++    expect(Fonts.getLocalFontDescriptor(fontFamily)?.metrics).toEqual(
++      expectedMetrics,
++    );
++    expect(
++      restoredElement.customData?.[LOCAL_FONT_CUSTOM_DATA_KEY],
++    ).toMatchObject({ metrics: expectedMetrics });
++  });
++
++  it("keeps the local font revision stable for repeated descriptors", async () => {
++    const family = "Repeated Descriptor Test";
++    const postscriptName = "RepeatedDescriptorTest-Regular";
++    window.queryLocalFonts = vi.fn(async () => [
++      createFontData(
++        family,
++        postscriptName,
++        "Regular",
++        createMetricsFontBuffer(),
++      ),
++    ]);
++
++    await Fonts.queryAndRegisterLocalFonts();
++    const fontFamily = Array.from(Fonts.registered.keys()).find(
++      (candidate) =>
++        Fonts.getLocalFontDescriptor(candidate)?.postscriptName ===
++        postscriptName,
++    )!;
++    const descriptor = Fonts.getLocalFontDescriptor(fontFamily)!;
++    const revisionBefore = Fonts.getLocalFontRevision();
++    Fonts.registerLocalFontsFromElements([
++      {
++        ...API.createElement({ type: "text", text: "one" }),
++        fontFamily,
++        customData: { [LOCAL_FONT_CUSTOM_DATA_KEY]: descriptor },
++      } as ExcalidrawTextElement,
++      {
++        ...API.createElement({ type: "text", text: "two" }),
++        fontFamily,
++        customData: { [LOCAL_FONT_CUSTOM_DATA_KEY]: descriptor },
++      } as ExcalidrawTextElement,
++    ]);
++
++    expect(Fonts.getLocalFontRevision()).toBe(revisionBefore);
++  });
++
+   it("reacquires a persisted font face by postscript name on first use", async () => {
+     window.EXCALIDRAW_LOCAL_FONT_STORAGE_KEY = LOCAL_FONT_STORAGE_TEST_KEY;
+     const family = "PLUS Reacquired Local Font Test";

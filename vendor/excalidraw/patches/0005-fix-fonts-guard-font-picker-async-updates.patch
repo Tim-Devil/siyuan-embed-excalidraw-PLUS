@@ -1,0 +1,63 @@
+From 212383332c89f4020505cf6030db97c0876f4821 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 19:45:46 +0800
+Subject: [PATCH] fix(fonts): guard font picker async updates
+
+---
+ .../components/FontPicker/FontPickerList.tsx      | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/packages/excalidraw/components/FontPicker/FontPickerList.tsx b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+index e39dc51..0cdf7ea 100644
+--- a/packages/excalidraw/components/FontPicker/FontPickerList.tsx
++++ b/packages/excalidraw/components/FontPicker/FontPickerList.tsx
+@@ -168,6 +168,8 @@ export const FontPickerList = React.memo(
+     );
+ 
+     useEffect(() => {
++      mountedRef.current = true;
++
+       return () => {
+         mountedRef.current = false;
+         selectionRequestRef.current += 1;
+@@ -215,10 +217,17 @@ export const FontPickerList = React.memo(
+     }, []);
+ 
+     const loadLocalFonts = useCallback(async () => {
++      if (!mountedRef.current) {
++        return;
++      }
++
+       setLocalFontStatus({ type: "loading" });
+ 
+       try {
+         const result = await Fonts.queryAndRegisterLocalFonts();
++        if (!mountedRef.current) {
++          return;
++        }
+         setAllFonts(getCachedFontDescriptors());
+         setLocalFontStatus({
+           type: "ready",
+@@ -226,7 +235,9 @@ export const FontPickerList = React.memo(
+         });
+       } catch (error) {
+         console.error("Failed to enumerate local fonts", error);
+-        setLocalFontStatus({ type: "error" });
++        if (mountedRef.current) {
++          setLocalFontStatus({ type: "error" });
++        }
+       }
+     }, []);
+ 
+@@ -388,6 +399,8 @@ export const FontPickerList = React.memo(
+         } else {
+           setAdditionalLocalFontFamily(targetFontFamily);
+         }
++      } else {
++        setAdditionalLocalFontFamily(null);
+       }
+     }, [
+       hoveredFontFamily,
+-- 
+2.53.0
+

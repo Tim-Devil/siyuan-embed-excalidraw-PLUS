@@ -1,7 +1,7 @@
 From 7715390d01086c33dd09819b96833cf752c9ce14 Mon Sep 17 00:00:00 2001
 From: Mayrain <3220104149@zju.edu.cn>
 Date: Tue, 1 Sep 2026 21:55:27 +0800
-Subject: [PATCH 1/3] feat(fonts): add local font registration and persistence
+Subject: [PATCH 1/4] feat(fonts): add local font registration and persistence
 
 ---
  .../excalidraw/actions/actionProperties.tsx   |   4 +
@@ -685,6 +685,3 @@ index e3e18eb..a39ec6b 100644
    for (const [fontFamilyString, id] of Object.entries(FONT_FAMILY)) {
      if (id === fontFamily) {
        // TODO: we should fallback first to generic family names first
--- 
-2.53.0
-

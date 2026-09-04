@@ -1,0 +1,28 @@
+From 80ea8660b104a7649798c750b5dbd172b3b6418c Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Fri, 4 Sep 2026 21:33:10 +0800
+Subject: [PATCH] fix(fonts): restore local descriptors from all scene elements
+
+---
+ packages/excalidraw/data/restore.ts | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/packages/excalidraw/data/restore.ts b/packages/excalidraw/data/restore.ts
+index e888870..4e56dd6 100644
+--- a/packages/excalidraw/data/restore.ts
++++ b/packages/excalidraw/data/restore.ts
+@@ -499,7 +499,10 @@ export const restoreElements = (
+   opts?: { refreshDimensions?: boolean; repairBindings?: boolean } | undefined,
+ ): OrderedExcalidrawElement[] => {
+   Fonts.registerLocalFontsFromElements(
+-    (elements || []) as readonly ExcalidrawElement[],
++    [
++      ...((elements || []) as readonly ExcalidrawElement[]),
++      ...(localElements || []),
++    ],
+   );
+ 
+   // used to detect duplicate top-level element ids
+-- 
+2.53.0
+

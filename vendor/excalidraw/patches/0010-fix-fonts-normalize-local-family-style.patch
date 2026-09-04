@@ -1,0 +1,42 @@
+From 58c98ae0b71d886eca1c42e8e1b2d1ef21d99048 Mon Sep 17 00:00:00 2001
+From: Mayrain <3220104149@zju.edu.cn>
+Date: Sat, 5 Sep 2026 01:46:42 +0800
+Subject: [PATCH] fix(fonts): normalize local family matching
+
+---
+ packages/excalidraw/element/textWysiwyg.tsx | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/packages/excalidraw/element/textWysiwyg.tsx b/packages/excalidraw/element/textWysiwyg.tsx
+index 3e32a30..be7e3c4 100644
+--- a/packages/excalidraw/element/textWysiwyg.tsx
++++ b/packages/excalidraw/element/textWysiwyg.tsx
+@@ -72,6 +72,9 @@ const getTransform = (
+   return `translate(${translateX}px, ${translateY}px) scale(${zoom.value}) rotate(${degree}deg)`;
+ };
+ 
++const normalizeFontFamilyStyle = (fontFamily: string): string =>
++  fontFamily.replace(/["']/g, "").replace(/\s+/g, " ").trim().toLowerCase();
++
+ export const textWysiwyg = ({
+   id,
+   onChange,
+@@ -106,10 +109,12 @@ export const textWysiwyg = ({
+     if (!editable.style.fontFamily || !editable.style.fontSize) {
+       return false;
+     }
+-    const currentFont = editable.style.fontFamily.replace(/"/g, "");
++    const currentFont = normalizeFontFamilyStyle(editable.style.fontFamily);
++    const expectedFont = normalizeFontFamilyStyle(
++      getFontFamilyString({ fontFamily: updatedTextElement.fontFamily }),
++    );
+     if (
+-      getFontFamilyString({ fontFamily: updatedTextElement.fontFamily }) !==
+-      currentFont
++      expectedFont !== currentFont
+     ) {
+       return true;
+     }
+-- 
+2.53.0
+

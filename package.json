@@ -1,6 +1,6 @@
 {
   "name": "siyuan-embed-excalidraw-plus",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "description": "SiYuan Excalidraw integration with local system font support",
   "author": "Yuxin Zhao, Tim-Devil",
@@ -25,7 +25,7 @@
     "build": "pnpm build:app && pnpm build:embed-siyuan && pnpm build:embed-markdown && pnpm build:plugin"
   },
   "dependencies": {
-    "@excalidraw/excalidraw": "file:vendor/excalidraw/excalidraw-0.18.0-local-fonts.1.tgz",
+    "@excalidraw/excalidraw": "file:vendor/excalidraw/excalidraw-0.18.0-local-fonts.7.tgz",
     "@zumer/snapdom": "^2.0.2",
     "crypto-js": "^4.2.0",
     "lodash": "^4.17.21",
@@ -43,7 +43,6 @@
     "@vue/tsconfig": "^0.7.0",
     "eslint": "^9.22.0",
     "eslint-plugin-format": "^1.0.1",
-    "eslint-plugin-perfectionist": "^4.2.0",
     "fast-glob": "^3.2.12",
     "glob": "^11.0.1",
     "minimist": "^1.2.8",
